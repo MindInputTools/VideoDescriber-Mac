@@ -23,7 +23,8 @@ class MainViewModel: ObservableObject {
     // MARK: - Inställningar (UserDefaults)
     @AppStorage("selectedModel") private var selectedModel = "ministral-3:latest"
     @AppStorage("systemPrompt") private var systemPrompt = SettingsView.defaultSystemPrompt
-    @AppStorage("defaultQuestion") private var defaultQuestion = ""
+    @AppStorage("defaultQuestion") private var defaultQuestion =
+    SettingsView.defaultDefaultQuestion
 
     // MARK: - Private State
     private var captureManager: ScreenCaptureManager?
@@ -179,8 +180,8 @@ class MainViewModel: ObservableObject {
         // Send to Ollama
         do {
             ollamaClient.model = selectedModel
-            let prompt = buildPrompt()
-            let response = try await ollamaClient.describe(imageBase64: base64, prompt: prompt)
+//            let prompt = buildPrompt()
+            let response = try await ollamaClient.describe(imageBase64: base64, prompt: defaultQuestion, system: systemPrompt)
             aiResponse = response
             statusMessage = "Beskrivning klar."
             statusColor = .green

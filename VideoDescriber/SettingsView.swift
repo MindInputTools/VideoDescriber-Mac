@@ -2,10 +2,11 @@ import SwiftUI
 
 struct SettingsView: View {
     static let defaultSystemPrompt = "Du är en professionell syntolk. Beskriv bilden kort och objektivt för en person med synnedsättning. Svara direkt på svenska."
-
+    static let defaultDefaultQuestion = "Utför din uppgift enligt din systemroll"
     @AppStorage("selectedModel") private var selectedModel = "ministral-3:latest"
     @AppStorage("systemPrompt") private var systemPrompt = SettingsView.defaultSystemPrompt
-    @AppStorage("defaultQuestion") private var defaultQuestion = ""
+    @AppStorage("defaultQuestion") private var defaultQuestion =
+    SettingsView.defaultDefaultQuestion
 
     @State private var availableModels: [String] = []
     @State private var isLoadingModels = false
@@ -54,8 +55,10 @@ struct SettingsView: View {
             // --- Standardfråga ---
             Section("Standardfråga (valfritt)") {
                 TextField("T.ex. 'Fokusera på ansiktsuttryck och gester'", text: $defaultQuestion)
-                Text("Om ifyllt läggs detta till efter systemprompten vid varje beskrivning.")
-                    .font(.caption)
+                Button("Återställ standard") {
+                    defaultQuestion = SettingsView.defaultDefaultQuestion
+                }
+                .font(.caption)
                     .foregroundColor(.secondary)
             }
         }

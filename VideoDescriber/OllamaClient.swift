@@ -15,12 +15,13 @@ class OllamaClient {
 
     /// Send an image to Ollama for visual description.
     /// Returns the full response string.
-    func describe(imageBase64: String, prompt: String) async throws -> String {
+    func describe(imageBase64: String, prompt: String, system: String) async throws -> String {
         let endpoint = baseURL.appendingPathComponent("api/generate")
 
         let body = OllamaGenerateRequest(
             model: model,
             prompt: prompt,
+            system: system,
             images: [imageBase64],
             stream: false
         )
@@ -31,7 +32,7 @@ class OllamaClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = encoded
-        request.timeoutInterval = 60
+        request.timeoutInterval = 120
 
         let (data, response) = try await URLSession.shared.data(for: request)
 
@@ -58,12 +59,13 @@ class OllamaClient {
 
     /// Stream a description, calling the update closure for each token.
     /// Use this for a more responsive UI (text appears word-by-word).
-    func describeStreaming(imageBase64: String, prompt: String, onUpdate: @escaping (String) -> Void) async throws -> String {
+    func describeStreaming(imageBase64: String, prompt: String, system: String, onUpdate: @escaping (String) -> Void) async throws -> String {
         let endpoint = baseURL.appendingPathComponent("api/generate")
 
         let body = OllamaGenerateRequest(
             model: model,
             prompt: prompt,
+            system: system,
             images: [imageBase64],
             stream: true
         )
@@ -102,6 +104,7 @@ class OllamaClient {
 private struct OllamaGenerateRequest: Encodable {
     let model: String
     let prompt: String
+    let system: String
     let images: [String]
     let stream: Bool
 }
