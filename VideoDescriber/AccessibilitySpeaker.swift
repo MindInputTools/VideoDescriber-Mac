@@ -14,6 +14,7 @@ class AccessibilitySpeaker: NSObject, NSSpeechSynthesizerDelegate {
     // MARK: - Private
     private let synthesizer = NSSpeechSynthesizer()
     private(set) var isSpeaking: Bool = false
+    private var onFinished: (() -> Void)?
 
     private override init() {
         super.init()
@@ -31,8 +32,10 @@ class AccessibilitySpeaker: NSObject, NSSpeechSynthesizerDelegate {
 
     /// Speak `text`. Routes through VoiceOver if active, NSSpeechSynthesizer otherwise.
     /// Calling this while already speaking will interrupt the current output first.
-    func speak(_ text: String) {
+    /// The optional `onFinished` callback is called when speech ends.
+    func speak(_ text: String, onFinished: (() -> Void)? = nil) {
         stop() // Interrupt any ongoing speech
+        self.onFinished = onFinished
 
         if isVoiceOverRunning() {
             announceViaVoiceOver(text)
@@ -49,6 +52,8 @@ class AccessibilitySpeaker: NSObject, NSSpeechSynthesizerDelegate {
         // VoiceOver announcements cannot be programmatically cancelled,
         // but the user can always press Control to silence VO.
         isSpeaking = false
+        onFinished?()
+        onFinished = nil
     }
 
     // MARK: - VoiceOver
@@ -76,7 +81,11 @@ class AccessibilitySpeaker: NSObject, NSSpeechSynthesizerDelegate {
             process.arguments = ["-e", script]
             try? process.run()
             process.waitUntilExit()
-            await MainActor.run { self.isSpeaking = false }
+            await MainActor.run {
+                self.isSpeaking = false
+                self.onFinished?()
+                self.onFinished = nil
+            }
         }
     }
 
@@ -90,6 +99,10 @@ class AccessibilitySpeaker: NSObject, NSSpeechSynthesizerDelegate {
     // MARK: - NSSpeechSynthesizerDelegate
 
     nonisolated func speechSynthesizer(_ sender: NSSpeechSynthesizer, didFinishSpeaking finishedSpeaking: Bool) {
-        Task { @MainActor in self.isSpeaking = false }
+        Task { @MainActor in
+            self.isSpeaking = false
+            self.onFinished?()
+            self.onFinished = nil
+        }
     }
 }
