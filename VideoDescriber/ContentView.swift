@@ -39,7 +39,7 @@ struct ContentView: View {
                 .disabled(viewModel.isCapturing)
 
                 Button(action: { Task { await viewModel.calibrate() } }) {
-                    Label("Hitta Video (Cmd+G)", systemImage: "viewfinder")
+                    Label("Hitta Video (§)", systemImage: "viewfinder")
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 6)
                 }
@@ -109,7 +109,7 @@ struct ContentView: View {
                 }
             }
 
-            Text("Tryck Cmd+G för att automatiskt analysera aktivt fönster")
+            Text("Tryck § för att automatiskt analysera aktivt fönster")
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)

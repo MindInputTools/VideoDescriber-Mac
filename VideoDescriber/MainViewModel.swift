@@ -211,9 +211,9 @@ class MainViewModel: ObservableObject {
         isSpeaking = false
     }
 
-    // MARK: - Auto-Hotkey Flow (Cmd+G equivalent)
+    // MARK: - Auto-Hotkey Flow (§ key)
     func setupHotKey() {
-        // Register Cmd+G as a global hotkey using Carbon
+        // Register § as a global hotkey using Carbon
         var hotKeyID = EventHotKeyID()
         hotKeyID.signature = OSType("VDSC".fourCharCode)
         hotKeyID.id = 1
@@ -230,8 +230,8 @@ class MainViewModel: ObservableObject {
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         InstallEventHandler(GetApplicationEventTarget(), handler, 1, &eventType, Unmanaged.passUnretained(self).toOpaque(), nil)
 
-        // Cmd = cmdKey (0x0100), G = kVK_ANSI_G (0x05)
-        RegisterEventHotKey(UInt32(kVK_ANSI_G), UInt32(cmdKey), hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
+        // § = kVK_ISO_Section (0x0A), no modifiers
+        RegisterEventHotKey(UInt32(kVK_ISO_Section), 0, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
     }
 
     func hotkeyTriggered() async {
