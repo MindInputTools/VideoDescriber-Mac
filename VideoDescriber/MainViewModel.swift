@@ -40,11 +40,10 @@ class MainViewModel: ObservableObject {
 
         do {
             let manager = ScreenCaptureManager()
-            try await manager.startCapture()
+            try await manager.requestPermission()
             self.captureManager = manager
-            hasCapture = true
-            statusMessage = "Fönster valt. Redo att kalibrera."
-            statusColor = .green
+            // Permission granted — now let user pick a window
+            await pickWindowWithPicker()
         } catch SCStreamError.userDeclined {
             statusMessage = "Skärminspelning nekad. Aktivera i Systeminställningar."
             statusColor = .red
@@ -73,8 +72,8 @@ class MainViewModel: ObservableObject {
                 return
             }
 
-            let manager = ScreenCaptureManager()
-            try await manager.startCaptureForWindow(window)
+            let manager = captureManager ?? ScreenCaptureManager()
+            manager.selectWindow(window)
             self.captureManager = manager
             hasCapture = true
             statusMessage = "Fångstar: \(window.owningApplication?.applicationName ?? "Okänt fönster")"
@@ -122,7 +121,7 @@ class MainViewModel: ObservableObject {
         do {
             var frames: [CGImage] = []
             for i in 0..<5 {
-                if let frame = await manager.captureFrame() {
+                if let frame = try? await manager.captureScreenshot() {
                     frames.append(frame)
                 }
                 if i < 4 {
@@ -157,7 +156,7 @@ class MainViewModel: ObservableObject {
         aiResponse = ""
         statusMessage = "Analyserar scen med AI..."
 
-        guard let fullFrame = await manager.captureFrame() else {
+        guard let fullFrame = try? await manager.captureScreenshot() else {
             statusMessage = "Kunde inte ta skärmbild."
             isDescribing = false
             return
@@ -188,15 +187,10 @@ class MainViewModel: ObservableObject {
             // Speak the description — routes through VoiceOver if active,
             // AVSpeechSynthesizer otherwise. Interruptible via Control (VO)
             // or the Stop button in the UI.
-            AccessibilitySpeaker.shared.speak(response)
-            isSpeaking = true
-            // Poll speaker to keep isSpeaking in sync (covers both VO and synth)
-            Task {
-                while AccessibilitySpeaker.shared.isSpeaking {
-                    try? await Task.sleep(nanoseconds: 200_000_000)
-                }
-                isSpeaking = false
+            AccessibilitySpeaker.shared.speak(response) { [weak self] in
+                self?.isSpeaking = false
             }
+            isSpeaking = true
         } catch {
             statusMessage = "AI-fel: \(error.localizedDescription)"
             statusColor = .red
@@ -221,8 +215,14 @@ class MainViewModel: ObservableObject {
         let handler: EventHandlerUPP = { _, event, userData -> OSStatus in
             guard let ctx = userData else { return noErr }
             let vm = Unmanaged<MainViewModel>.fromOpaque(ctx).takeUnretainedValue()
+            // Capture the frontmost app synchronously before async dispatch,
+            // because once our app processes the hotkey we become frontmost.
+            let frontApp = NSWorkspace.shared.frontmostApplication
+            // Capture the window list synchronously too — CGWindowListCopyWindowInfo
+            // uses internal locks that trigger concurrency warnings in async contexts.
+            let cgWindows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[CFString: Any]] ?? []
             Task { @MainActor in
-                await vm.hotkeyTriggered()
+                await vm.hotkeyTriggered(frontmostApp: frontApp, cgWindows: cgWindows)
             }
             return noErr
         }
@@ -234,10 +234,10 @@ class MainViewModel: ObservableObject {
         RegisterEventHotKey(UInt32(kVK_ISO_Section), 0, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
     }
 
-    func hotkeyTriggered() async {
+    func hotkeyTriggered(frontmostApp: NSRunningApplication?, cgWindows: [[CFString: Any]]) async {
         if captureManager == nil {
             // Auto-capture the frontmost window (excluding our own)
-            await autoCaptureFrontWindow()
+            await autoCaptureFrontWindow(frontmostApp: frontmostApp, cgWindows: cgWindows)
         }
         if !hasVideoArea {
             await calibrate()
@@ -245,41 +245,48 @@ class MainViewModel: ObservableObject {
         await describe()
     }
 
-    private func autoCaptureFrontWindow() async {
+    private func autoCaptureFrontWindow(frontmostApp: NSRunningApplication?, cgWindows: [[CFString: Any]]) async {
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             let ourPID = ProcessInfo.processInfo.processIdentifier
 
-            // Use NSWorkspace to find the actual frontmost app (excluding ourselves)
-            let frontmostApp = NSWorkspace.shared.runningApplications
-                .filter { $0.isActive || $0.ownsMenuBar }
-                .first { $0.processIdentifier != ourPID }
-            ?? NSWorkspace.shared.frontmostApplication
-
-            // Match by frontmost app's PID, fall back to largest window from another app
-            let targetPID = frontmostApp?.processIdentifier
-            let candidateWindows = content.windows.filter {
+            // Use the frontmost app captured at hotkey time (before our app became active)
+            let targetPID: pid_t?
+            if let frontmostApp, frontmostApp.processIdentifier != ourPID {
+                targetPID = frontmostApp.processIdentifier
+            } else {
+                targetPID = nil
+            }
+            // Match the pre-captured CGWindowList (front-to-back order) against
+            // SCShareableContent windows by windowID.
+            let scWindows = content.windows.filter {
                 $0.owningApplication?.processID != ourPID &&
                 $0.frame.width > 100 &&
                 $0.frame.height > 100
             }
+            let scWindowsByID = Dictionary(uniqueKeysWithValues: scWindows.map { ($0.windowID, $0) })
 
             let window: SCWindow?
             if let targetPID {
-                // Prefer the largest window from the frontmost app
-                window = candidateWindows
-                    .filter { $0.owningApplication?.processID == targetPID }
-                    .max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
+                // Find the frontmost on-screen window belonging to the target app
+                window = cgWindows.lazy
+                    .filter { ($0[kCGWindowOwnerPID] as? pid_t) == targetPID &&
+                              ($0[kCGWindowLayer] as? Int) == 0 }
+                    .compactMap { scWindowsByID[($0[kCGWindowNumber] as? CGWindowID) ?? 0] }
+                    .first
             } else {
-                // Fallback: pick the largest candidate window
-                window = candidateWindows
-                    .max(by: { $0.frame.width * $0.frame.height < $1.frame.width * $1.frame.height })
+                // Fallback: frontmost normal-layer window from any other app
+                window = cgWindows.lazy
+                    .filter { ($0[kCGWindowOwnerPID] as? pid_t) != ourPID &&
+                              ($0[kCGWindowLayer] as? Int) == 0 }
+                    .compactMap { scWindowsByID[($0[kCGWindowNumber] as? CGWindowID) ?? 0] }
+                    .first
             }
 
             guard let window else { return }
 
             let manager = ScreenCaptureManager()
-            try await manager.startCaptureForWindow(window)
+            manager.selectWindow(window)
             self.captureManager = manager
             hasCapture = true
             statusMessage = "Auto-fångad: \(window.owningApplication?.applicationName ?? "Okänt")"
