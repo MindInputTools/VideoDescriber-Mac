@@ -14,32 +14,30 @@ class AccessibilitySpeaker: NSObject, NSSpeechSynthesizerDelegate {
     // MARK: - Private
     private let synthesizer = NSSpeechSynthesizer()
     private(set) var isSpeaking: Bool = false
+    /// Whether the current (or most recent) speech used VoiceOver routing.
+    private(set) var isUsingVoiceOver: Bool = false
     private var onFinished: (() -> Void)?
 
     private override init() {
         super.init()
         synthesizer.delegate = self
-        // Prefer a Swedish voice if available
-        let svVoice = NSSpeechSynthesizer.availableVoices.first {
-            $0.rawValue.contains("sv-SE") || $0.rawValue.contains("sv_SE")
-        }
-        if let svVoice {
-            synthesizer.setVoice(svVoice)
-        }
     }
 
     // MARK: - Public API
 
-    /// Speak `text`. Routes through VoiceOver if active, NSSpeechSynthesizer otherwise.
+    /// Speak `text`. When `viaVoiceOver` is true and VoiceOver is running, routes
+    /// through VoiceOver; otherwise uses NSSpeechSynthesizer.
     /// Calling this while already speaking will interrupt the current output first.
     /// The optional `onFinished` callback is called when speech ends.
-    func speak(_ text: String, onFinished: (() -> Void)? = nil) {
+    func speak(_ text: String, viaVoiceOver: Bool = false, onFinished: (() -> Void)? = nil) {
         stop() // Interrupt any ongoing speech
         self.onFinished = onFinished
 
-        if isVoiceOverRunning() {
+        if viaVoiceOver && isVoiceOverRunning() {
+            isUsingVoiceOver = true
             announceViaVoiceOver(text)
         } else {
+            isUsingVoiceOver = false
             announceViaSynthesizer(text)
         }
     }
@@ -92,6 +90,16 @@ class AccessibilitySpeaker: NSObject, NSSpeechSynthesizerDelegate {
     // MARK: - NSSpeechSynthesizer fallback
 
     private func announceViaSynthesizer(_ text: String) {
+        // Apply the voice chosen in Settings (empty = system default)
+        let voiceID = UserDefaults.standard.string(forKey: "selectedVoice") ?? ""
+        if voiceID.isEmpty {
+            synthesizer.setVoice(nil)  // system default voice
+        } else {
+            synthesizer.setVoice(NSSpeechSynthesizer.VoiceName(rawValue: voiceID))
+        }
+        // Apply the speech rate from Settings (default 175 wpm)
+        let rate = UserDefaults.standard.double(forKey: "speechRate")
+        synthesizer.rate = Float(rate > 0 ? rate : 175)
         isSpeaking = true
         synthesizer.startSpeaking(text)
     }

@@ -25,6 +25,7 @@ class MainViewModel: ObservableObject {
     @AppStorage("systemPrompt") private var systemPrompt = SettingsView.defaultSystemPrompt
     @AppStorage("defaultQuestion") private var defaultQuestion =
     SettingsView.defaultDefaultQuestion
+    @AppStorage("useVoiceOver") private var useVoiceOver = false
 
     // MARK: - Private State
     private var captureManager: ScreenCaptureManager?
@@ -32,6 +33,7 @@ class MainViewModel: ObservableObject {
     private var ollamaClient = OllamaClient()
     private var videoArea: CGRect = .zero
     private var hotKeyRef: EventHotKeyRef?
+    private var videoPausedByUs: Bool = false
 
     // MARK: - Window Picking
     func pickWindow() async {
@@ -162,10 +164,17 @@ class MainViewModel: ObservableObject {
             return
         }
 
+        // Pause the video *after* the screenshot so we don't capture player UI overlays
+        sendMediaPlayPause()
+        videoPausedByUs = true
+
+        let willUseVoiceOver = useVoiceOver
+
         // Crop to video area
         guard let cropped = cropImage(fullFrame, to: videoArea) else {
             statusMessage = "Kunde inte beskära videoarea."
             isDescribing = false
+            if videoPausedByUs { sendMediaPlayPause(); videoPausedByUs = false }
             return
         }
 
@@ -173,33 +182,47 @@ class MainViewModel: ObservableObject {
         guard let base64 = imageToBase64JPEG(cropped) else {
             statusMessage = "Bildkonvertering misslyckades."
             isDescribing = false
+            if videoPausedByUs { sendMediaPlayPause(); videoPausedByUs = false }
             return
         }
 
         // Send to Ollama
         do {
             ollamaClient.model = selectedModel
-//            let prompt = buildPrompt()
             let response = try await ollamaClient.describe(imageBase64: base64, prompt: defaultQuestion, system: systemPrompt)
             aiResponse = response
             statusMessage = "Beskrivning klar."
             statusColor = .green
-            // Speak the description — routes through VoiceOver if active,
-            // AVSpeechSynthesizer otherwise. Interruptible via Control (VO)
-            // or the Stop button in the UI.
-            AccessibilitySpeaker.shared.speak(response) { [weak self] in
+
+            // When using VoiceOver: no auto-resume (user resumes manually).
+            // When using system speech: auto-resume when speech finishes,
+            // and § key can stop speech early (which also resumes).
+            let onSpeechFinished: (() -> Void)? = willUseVoiceOver ? nil : { [weak self] in
                 self?.isSpeaking = false
+                if self?.videoPausedByUs == true {
+                    self?.sendMediaPlayPause()
+                    self?.videoPausedByUs = false
+                }
             }
-            isSpeaking = true
+
+            AccessibilitySpeaker.shared.speak(response, viaVoiceOver: willUseVoiceOver, onFinished: onSpeechFinished)
+            isSpeaking = !willUseVoiceOver  // Only track speaking state for system speech
+            if willUseVoiceOver {
+                // VoiceOver: video stays paused, user resumes manually
+                videoPausedByUs = false
+            }
         } catch {
             statusMessage = "AI-fel: \(error.localizedDescription)"
             statusColor = .red
+            if videoPausedByUs { sendMediaPlayPause(); videoPausedByUs = false }
         }
 
         isDescribing = false
     }
 
-    /// Stop any ongoing speech (called from the UI stop button)
+    /// Stop any ongoing speech (called from the UI stop button or § key re-press).
+    /// The AccessibilitySpeaker.stop() triggers onFinished, which handles video resume
+    /// for system speech. For VoiceOver mode videoPausedByUs is already false.
     func stopSpeaking() {
         AccessibilitySpeaker.shared.stop()
         isSpeaking = false
@@ -235,6 +258,16 @@ class MainViewModel: ObservableObject {
     }
 
     func hotkeyTriggered(frontmostApp: NSRunningApplication?, cgWindows: [[CFString: Any]]) async {
+        // If currently speaking (system speech), § stops speech and resumes video
+        if isSpeaking {
+            stopSpeaking()
+            return
+        }
+
+        // Clear stale pause state from a previous VoiceOver cycle where
+        // the user resumed the video manually.
+        videoPausedByUs = false
+
         if captureManager == nil {
             // Auto-capture the frontmost window (excluding our own)
             await autoCaptureFrontWindow(frontmostApp: frontmostApp, cgWindows: cgWindows)
@@ -292,6 +325,44 @@ class MainViewModel: ObservableObject {
             statusMessage = "Auto-fångad: \(window.owningApplication?.applicationName ?? "Okänt")"
         } catch {
             statusMessage = "Auto-fångning misslyckades: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - Media Key Simulation
+
+    /// Sends a system-wide media Play/Pause key event (same as the physical ⏯ key).
+    private func sendMediaPlayPause() {
+        // NX_KEYTYPE_PLAY = 16
+        let keyCode: UInt32 = 16
+
+        // Key down
+        if let keyDown = NSEvent.otherEvent(
+            with: .systemDefined,
+            location: .zero,
+            modifierFlags: NSEvent.ModifierFlags(rawValue: 0xa00),
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            subtype: 8,                        // NX_SUBTYPE_AUX_CONTROL_BUTTONS
+            data1: Int((keyCode << 16) | (0xa << 8)),  // key down
+            data2: -1
+        ) {
+            keyDown.cgEvent?.post(tap: .cghidEventTap)
+        }
+
+        // Key up
+        if let keyUp = NSEvent.otherEvent(
+            with: .systemDefined,
+            location: .zero,
+            modifierFlags: NSEvent.ModifierFlags(rawValue: 0xb00),
+            timestamp: 0,
+            windowNumber: 0,
+            context: nil,
+            subtype: 8,
+            data1: Int((keyCode << 16) | (0xb << 8)),  // key up
+            data2: -1
+        ) {
+            keyUp.cgEvent?.post(tap: .cghidEventTap)
         }
     }
 
