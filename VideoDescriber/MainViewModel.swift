@@ -9,6 +9,9 @@ import AppKit
 
 @MainActor
 class MainViewModel: ObservableObject {
+    /// Shared instance so App Intents (Siri Shortcuts) can trigger actions.
+    static var shared: MainViewModel?
+
     // MARK: - Published State
     @Published var statusMessage: String = "Väntar på fönsterval..."
     @Published var statusColor: Color = .orange
@@ -411,3 +414,5 @@ extension String {
         return result
     }
 }
+
+

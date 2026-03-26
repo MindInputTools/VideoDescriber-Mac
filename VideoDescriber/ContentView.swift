@@ -119,6 +119,7 @@ struct ContentView: View {
         }
         .padding()
         .onAppear {
+            MainViewModel.shared = viewModel
             viewModel.setupHotKey()
         }
     }

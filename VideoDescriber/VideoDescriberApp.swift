@@ -1,7 +1,13 @@
 import SwiftUI
+import AppIntents
 
 @main
 struct VideoDescriberApp: App {
+    init() {
+        // Register App Shortcuts so they're available in Siri and the Shortcuts app.
+        VideoDescriberShortcuts.updateAppShortcutParameters()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
