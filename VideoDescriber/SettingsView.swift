@@ -10,6 +10,7 @@ struct SettingsView: View {
     @AppStorage("useVoiceOver") private var useVoiceOver = false
     @AppStorage("selectedVoice") private var selectedVoice = ""
     @AppStorage("speechRate") private var speechRate: Double = 175
+    @AppStorage("detectionMethod") private var detectionMethod = VideoDetectionMethod.smartBorder.rawValue
 
     @State private var availableModels: [String] = []
     @State private var isLoadingModels = false
@@ -48,6 +49,22 @@ struct SettingsView: View {
                         }
                     }
                 }
+            }
+
+            // --- Detekteringsmetod ---
+            Section("Detektering av videoområde") {
+                Picker("Metod", selection: $detectionMethod) {
+                    ForEach(VideoDetectionMethod.allCases) { method in
+                        Text(method.displayName).tag(method.rawValue)
+                    }
+                }
+                .pickerStyle(.radioGroup)
+
+                Text(
+                    (VideoDetectionMethod(rawValue: detectionMethod) ?? .smartBorder).explanation
+                )
+                .font(.caption)
+                .foregroundColor(.secondary)
             }
 
             // --- Systemprompt ---
@@ -101,7 +118,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 480, height: 520)
+        .frame(width: 480, height: 600)
         .task {
             await loadModels()
         }

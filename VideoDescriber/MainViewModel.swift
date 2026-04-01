@@ -22,6 +22,7 @@ class MainViewModel: ObservableObject {
     @Published var hasCapture: Bool = false
     @Published var hasVideoArea: Bool = false
     @Published var isSpeaking: Bool = false
+    @Published var detectionDiagnostics: String = ""
 
     // MARK: - Inställningar (UserDefaults)
     @AppStorage("selectedModel") private var selectedModel = "ministral-3:latest"
@@ -29,11 +30,30 @@ class MainViewModel: ObservableObject {
     @AppStorage("defaultQuestion") private var defaultQuestion =
     SettingsView.defaultDefaultQuestion
     @AppStorage("useVoiceOver") private var useVoiceOver = false
+    @AppStorage("detectionMethod") private var detectionMethodRaw = VideoDetectionMethod.smartBorder.rawValue
 
     // MARK: - Private State
     private var captureManager: ScreenCaptureManager?
-    private var videoDetector = VideoMotionDetector()
+    private let smartBorderDetector = SmartBorderDetector()
+    private let motionDetector = VideoMotionDetector()
     private var ollamaClient = OllamaClient()
+
+    private var activeDetector: VideoAreaDetecting {
+        let method = VideoDetectionMethod(rawValue: detectionMethodRaw) ?? .smartBorder
+        switch method {
+        case .smartBorder: return smartBorderDetector
+        case .motion: return motionDetector
+        }
+    }
+
+    var calibrationProgressMessage: String {
+        let method = VideoDetectionMethod(rawValue: detectionMethodRaw) ?? .smartBorder
+        switch method {
+        case .smartBorder: return "Analyserar bild..."
+        case .motion: return "Analyserar rörelse..."
+        }
+    }
+
     private var videoArea: CGRect = .zero
     private var hotKeyRef: EventHotKeyRef?
     private var videoPausedByUs: Bool = false
@@ -120,31 +140,71 @@ class MainViewModel: ObservableObject {
     func calibrate() async {
         guard let manager = captureManager else { return }
         isCalibrating = true
-        statusMessage = "Analyserar rörelse..."
+
+        let method = VideoDetectionMethod(rawValue: detectionMethodRaw) ?? .smartBorder
+
+        switch method {
+        case .smartBorder:
+            statusMessage = "Analyserar bild..."
+        case .motion:
+            statusMessage = "Analyserar rörelse..."
+        }
         statusColor = .orange
 
         do {
             var frames: [CGImage] = []
-            for i in 0..<5 {
+
+            switch method {
+            case .smartBorder:
+                // Single frame — fast
                 if let frame = try? await manager.captureScreenshot() {
                     frames.append(frame)
                 }
-                if i < 4 {
-                    try await Task.sleep(nanoseconds: 500_000_000) // 0.5s
+            case .motion:
+                // 5 frames over ~2s (existing behavior)
+                for i in 0..<5 {
+                    if let frame = try? await manager.captureScreenshot() {
+                        frames.append(frame)
+                    }
+                    if i < 4 {
+                        try await Task.sleep(nanoseconds: 500_000_000) // 0.5s
+                    }
                 }
             }
 
-            let detected = videoDetector.detectMotionArea(in: frames)
+            let detected = activeDetector.detectVideoArea(in: frames)
             videoArea = detected
+
+            // Capture diagnostics from smart border detector
+            if method == .smartBorder {
+                detectionDiagnostics = smartBorderDetector.lastDiagnostics
+            } else {
+                detectionDiagnostics = "Rörelsedetektering: \(detected.width > 0 ? "\(Int(detected.width))×\(Int(detected.height)) px" : "inget hittat")"
+            }
 
             if detected.width > 0 && detected.height > 0 {
                 statusMessage = "Video hittad! (\(Int(detected.width))×\(Int(detected.height)) px)"
                 statusColor = .green
                 hasVideoArea = true
             } else {
-                statusMessage = "Ingen video hittad. Prova igen med video igång."
-                statusColor = .red
-                hasVideoArea = false
+                switch method {
+                case .smartBorder:
+                    // Fallback: use the full window frame rather than failing
+                    if let fullSize = captureManager?.captureSize, fullSize.width > 0 {
+                        videoArea = CGRect(origin: .zero, size: fullSize)
+                        hasVideoArea = true
+                        statusMessage = "Inget videoområde hittades — använder hela fönstret."
+                        statusColor = .yellow
+                    } else {
+                        statusMessage = "Inget videoområde hittades."
+                        statusColor = .red
+                        hasVideoArea = false
+                    }
+                case .motion:
+                    statusMessage = "Ingen video hittad. Prova igen med video igång."
+                    statusColor = .red
+                    hasVideoArea = false
+                }
             }
         } catch {
             statusMessage = "Kalibrering misslyckades: \(error.localizedDescription)"

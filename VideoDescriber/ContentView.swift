@@ -3,6 +3,7 @@ import ScreenCaptureKit
 
 struct ContentView: View {
     @StateObject private var viewModel = MainViewModel()
+    @State private var showDiagnostics = false
 
     var body: some View {
         VStack(spacing: 16) {
@@ -47,7 +48,7 @@ struct ContentView: View {
                 .disabled(!viewModel.hasCapture || viewModel.isCalibrating)
 
                 if viewModel.isCalibrating {
-                    ProgressView("Analyserar rörelse...")
+                    ProgressView(viewModel.calibrationProgressMessage)
                         .progressViewStyle(.linear)
                 }
 
@@ -114,6 +115,30 @@ struct ContentView: View {
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
+
+            // Diagnostics toggle — only shown after a calibration has produced data
+            if !viewModel.detectionDiagnostics.isEmpty {
+                Button(action: { showDiagnostics.toggle() }) {
+                    Label(showDiagnostics ? "Dölj diagnostik" : "Visa diagnostik",
+                          systemImage: showDiagnostics ? "chevron.up" : "chevron.down")
+                        .font(.caption)
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+
+                if showDiagnostics {
+                    ScrollView {
+                        Text(viewModel.detectionDiagnostics)
+                            .font(.system(.caption, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(8)
+                    }
+                    .frame(maxHeight: 100)
+                    .background(Color(nsColor: .textBackgroundColor))
+                    .cornerRadius(6)
+                    .padding(.horizontal)
+                }
+            }
 
             Spacer()
         }

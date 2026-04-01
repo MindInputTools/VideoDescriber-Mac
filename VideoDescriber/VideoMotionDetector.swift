@@ -4,7 +4,13 @@ import CoreGraphics
 
 /// Detects the region of the screen where video motion occurs.
 /// Replaces VideoAutoDetector.cs which used OpenCV — here we use CoreImage filters instead.
-class VideoMotionDetector {
+class VideoMotionDetector: VideoAreaDetecting {
+
+    // MARK: - VideoAreaDetecting
+
+    func detectVideoArea(in frames: [CGImage]) -> CGRect {
+        return detectMotionArea(in: frames)
+    }
 
     /// Given a sequence of frames, returns the CGRect bounding box of the area with significant motion.
     /// Returns .zero if no motion area large enough is found.
