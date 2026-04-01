@@ -27,6 +27,48 @@ struct ContentView: View {
             }
             .padding(.horizontal)
 
+            // Current selection info
+            if viewModel.selectedAppName != nil || viewModel.videoAreaDescription != nil {
+                VStack(alignment: .leading, spacing: 4) {
+                    if let app = viewModel.selectedAppName {
+                        HStack(spacing: 4) {
+                            Text("App:")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text(app)
+                                .font(.caption)
+                                .fontWeight(.medium)
+                            if let title = viewModel.selectedWindowTitle, !title.isEmpty {
+                                Text("— \(title)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                            }
+                        }
+                    }
+                    if let area = viewModel.videoAreaDescription {
+                        HStack(spacing: 4) {
+                            Text("Videoyta:")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text(area)
+                                .font(.caption)
+                                .fontWeight(.medium)
+                        }
+                    }
+                }
+                .padding(.horizontal)
+
+                Button(action: { viewModel.resetSelection() }) {
+                    Label("Återställ val", systemImage: "arrow.counterclockwise")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .padding(.horizontal)
+            }
+
             Divider()
 
             // Buttons

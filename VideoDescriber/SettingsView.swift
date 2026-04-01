@@ -11,6 +11,7 @@ struct SettingsView: View {
     @AppStorage("selectedVoice") private var selectedVoice = ""
     @AppStorage("speechRate") private var speechRate: Double = 175
     @AppStorage("detectionMethod") private var detectionMethod = VideoDetectionMethod.smartBorder.rawValue
+    @AppStorage("followFrontmost") private var followFrontmost = false
 
     @State private var availableModels: [String] = []
     @State private var isLoadingModels = false
@@ -65,6 +66,16 @@ struct SettingsView: View {
                 )
                 .font(.caption)
                 .foregroundColor(.secondary)
+            }
+
+            // --- Fönsterbeteende ---
+            Section("Fönsterbeteende") {
+                Toggle("Följ aktivt fönster", isOn: $followFrontmost)
+                Text(followFrontmost
+                     ? "§-tangenten beskriver alltid det aktiva fönstret. Om du byter app omdetekteras videoområdet automatiskt."
+                     : "§-tangenten håller sig till det ursprungligt valda fönstret tills du återställer manuellt.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
 
             // --- Systemprompt ---

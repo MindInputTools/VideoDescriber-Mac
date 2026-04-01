@@ -23,6 +23,9 @@ class MainViewModel: ObservableObject {
     @Published var hasVideoArea: Bool = false
     @Published var isSpeaking: Bool = false
     @Published var detectionDiagnostics: String = ""
+    @Published var selectedAppName: String?
+    @Published var selectedWindowTitle: String?
+    @Published var videoAreaDescription: String?
 
     // MARK: - Inställningar (UserDefaults)
     @AppStorage("selectedModel") private var selectedModel = "ministral-3:latest"
@@ -31,6 +34,7 @@ class MainViewModel: ObservableObject {
     SettingsView.defaultDefaultQuestion
     @AppStorage("useVoiceOver") private var useVoiceOver = false
     @AppStorage("detectionMethod") private var detectionMethodRaw = VideoDetectionMethod.smartBorder.rawValue
+    @AppStorage("followFrontmost") private var followFrontmost = false
 
     // MARK: - Private State
     private var captureManager: ScreenCaptureManager?
@@ -57,6 +61,7 @@ class MainViewModel: ObservableObject {
     private var videoArea: CGRect = .zero
     private var hotKeyRef: EventHotKeyRef?
     private var videoPausedByUs: Bool = false
+    private var selectedPID: pid_t?
 
     // MARK: - Window Picking
     func pickWindow() async {
@@ -101,6 +106,9 @@ class MainViewModel: ObservableObject {
             manager.selectWindow(window)
             self.captureManager = manager
             hasCapture = true
+            selectedAppName = window.owningApplication?.applicationName
+            selectedWindowTitle = window.title
+            selectedPID = window.owningApplication?.processID
             statusMessage = "Fångstar: \(window.owningApplication?.applicationName ?? "Okänt fönster")"
             statusColor = .green
         } catch {
@@ -186,6 +194,7 @@ class MainViewModel: ObservableObject {
                 statusMessage = "Video hittad! (\(Int(detected.width))×\(Int(detected.height)) px)"
                 statusColor = .green
                 hasVideoArea = true
+                videoAreaDescription = "\(Int(detected.width))×\(Int(detected.height)) px"
             } else {
                 switch method {
                 case .smartBorder:
@@ -193,6 +202,7 @@ class MainViewModel: ObservableObject {
                     if let fullSize = captureManager?.captureSize, fullSize.width > 0 {
                         videoArea = CGRect(origin: .zero, size: fullSize)
                         hasVideoArea = true
+                        videoAreaDescription = "\(Int(fullSize.width))×\(Int(fullSize.height)) px (hela fönstret)"
                         statusMessage = "Inget videoområde hittades — använder hela fönstret."
                         statusColor = .yellow
                     } else {
@@ -291,6 +301,24 @@ class MainViewModel: ObservableObject {
         isSpeaking = false
     }
 
+    /// Resets window selection and video area so the user can pick a new target.
+    func resetSelection() {
+        stopSpeaking()
+        captureManager = nil
+        hasCapture = false
+        hasVideoArea = false
+        videoArea = .zero
+        selectedAppName = nil
+        selectedWindowTitle = nil
+        selectedPID = nil
+        videoAreaDescription = nil
+        aiResponse = ""
+        detectionDiagnostics = ""
+        videoPausedByUs = false
+        statusMessage = "Väntar på fönsterval..."
+        statusColor = .orange
+    }
+
     // MARK: - Auto-Hotkey Flow (§ key)
     func setupHotKey() {
         // Register § as a global hotkey using Carbon
@@ -330,6 +358,16 @@ class MainViewModel: ObservableObject {
         // Clear stale pause state from a previous VoiceOver cycle where
         // the user resumed the video manually.
         videoPausedByUs = false
+
+        // If "follow frontmost" is enabled and the frontmost app changed, reset
+        // so we re-acquire the new window and re-calibrate.
+        if followFrontmost,
+           captureManager != nil,
+           let frontPID = frontmostApp?.processIdentifier,
+           frontPID != ProcessInfo.processInfo.processIdentifier,
+           frontPID != selectedPID {
+            resetSelection()
+        }
 
         if captureManager == nil {
             // Auto-capture the frontmost window (excluding our own)
@@ -385,6 +423,9 @@ class MainViewModel: ObservableObject {
             manager.selectWindow(window)
             self.captureManager = manager
             hasCapture = true
+            selectedAppName = window.owningApplication?.applicationName
+            selectedWindowTitle = window.title
+            selectedPID = window.owningApplication?.processID
             statusMessage = "Auto-fångad: \(window.owningApplication?.applicationName ?? "Okänt")"
         } catch {
             statusMessage = "Auto-fångning misslyckades: \(error.localizedDescription)"
