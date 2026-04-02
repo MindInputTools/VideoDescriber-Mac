@@ -1,11 +1,21 @@
 import Foundation
 
 /// Communicates with a locally running Ollama instance.
-/// Replaces the OllamaSharp NuGet package — uses only Apple's URLSession.
+/// Uses the /api/chat endpoint to maintain conversation context so the model
+/// can focus on what changed since the previous description.
 class OllamaClient {
 
     private let baseURL: URL
-    var model: String = "ministral-3:latest" // Use a vision-capable model; change to your preferred one
+    var model: String = "ministral-3:latest"
+
+    /// Rolling conversation history. Kept compact — only the last
+    /// `maxHistoryPairs` user/assistant exchanges are retained (plus the
+    /// system message which is sent separately).
+    private(set) var conversationHistory: [ChatMessage] = []
+
+    /// How many user+assistant pairs to keep. 5 pairs = 10 messages,
+    /// enough context to avoid repetition without growing unbounded.
+    var maxHistoryPairs: Int = 5
 
     init(baseURL: URL = URL(string: "http://127.0.0.1:11434")!) {
         self.baseURL = baseURL
@@ -13,16 +23,22 @@ class OllamaClient {
 
     // MARK: - Public API
 
-    /// Send an image to Ollama for visual description.
-    /// Returns the full response string.
+    /// Send an image to Ollama for visual description using the chat endpoint.
+    /// The conversation history is maintained automatically so the model knows
+    /// what it already described.
     func describe(imageBase64: String, prompt: String, system: String) async throws -> String {
-        let endpoint = baseURL.appendingPathComponent("api/generate")
+        let endpoint = baseURL.appendingPathComponent("api/chat")
 
-        let body = OllamaGenerateRequest(
+        // Build the full messages array: system + past history (text only) + current user message (with image)
+        var messages: [ChatMessage] = [
+            ChatMessage(role: "system", content: system, images: nil)
+        ]
+        messages.append(contentsOf: trimmedHistory())
+        messages.append(ChatMessage(role: "user", content: prompt, images: [imageBase64]))
+
+        let body = OllamaChatRequest(
             model: model,
-            prompt: prompt,
-            system: system,
-            images: [imageBase64],
+            messages: messages,
             stream: false
         )
 
@@ -45,8 +61,17 @@ class OllamaClient {
             throw OllamaError.serverError(httpResponse.statusCode, body)
         }
 
-        let decoded = try JSONDecoder().decode(OllamaGenerateResponse.self, from: data)
-        return decoded.response
+        let decoded = try JSONDecoder().decode(OllamaChatResponse.self, from: data)
+        let responseText = decoded.message.content
+
+        // Store in history *without* the image — the assistant's text description
+        // provides the context for future requests, not the raw image data.
+        conversationHistory.append(ChatMessage(role: "user", content: prompt, images: nil))
+        conversationHistory.append(ChatMessage(role: "assistant", content: responseText, images: nil))
+
+        trimHistoryIfNeeded()
+
+        return responseText
     }
 
     /// List available models from the local Ollama instance.
@@ -58,15 +83,18 @@ class OllamaClient {
     }
 
     /// Stream a description, calling the update closure for each token.
-    /// Use this for a more responsive UI (text appears word-by-word).
     func describeStreaming(imageBase64: String, prompt: String, system: String, onUpdate: @escaping (String) -> Void) async throws -> String {
-        let endpoint = baseURL.appendingPathComponent("api/generate")
+        let endpoint = baseURL.appendingPathComponent("api/chat")
 
-        let body = OllamaGenerateRequest(
+        var messages: [ChatMessage] = [
+            ChatMessage(role: "system", content: system, images: nil)
+        ]
+        messages.append(contentsOf: trimmedHistory())
+        messages.append(ChatMessage(role: "user", content: prompt, images: [imageBase64]))
+
+        let body = OllamaChatRequest(
             model: model,
-            prompt: prompt,
-            system: system,
-            images: [imageBase64],
+            messages: messages,
             stream: true
         )
 
@@ -85,45 +113,93 @@ class OllamaClient {
         for try await line in asyncBytes.lines {
             guard !line.isEmpty,
                   let lineData = line.data(using: .utf8),
-                  let chunk = try? JSONDecoder().decode(OllamaGenerateResponse.self, from: lineData) else {
+                  let chunk = try? JSONDecoder().decode(OllamaChatResponse.self, from: lineData) else {
                 continue
             }
 
-            fullResponse += chunk.response
+            fullResponse += chunk.message.content
             await MainActor.run { onUpdate(fullResponse) }
 
             if chunk.done == true { break }
         }
 
+        // Store in history without the image
+        conversationHistory.append(ChatMessage(role: "user", content: prompt, images: nil))
+        conversationHistory.append(ChatMessage(role: "assistant", content: fullResponse, images: nil))
+        trimHistoryIfNeeded()
+
         return fullResponse
+    }
+
+    // MARK: - Conversation Management
+
+    /// Clear conversation history so the next description starts fresh.
+    func resetConversation() {
+        conversationHistory.removeAll()
+    }
+
+    /// Whether there is any conversation context built up.
+    var hasConversationContext: Bool {
+        !conversationHistory.isEmpty
+    }
+
+    // MARK: - Private Helpers
+
+    /// Returns the history trimmed to the last `maxHistoryPairs` exchanges.
+    private func trimmedHistory() -> [ChatMessage] {
+        let maxMessages = maxHistoryPairs * 2
+        if conversationHistory.count <= maxMessages {
+            return conversationHistory
+        }
+        return Array(conversationHistory.suffix(maxMessages))
+    }
+
+    /// Trims stored history in-place to avoid unbounded growth.
+    private func trimHistoryIfNeeded() {
+        let maxMessages = maxHistoryPairs * 2
+        if conversationHistory.count > maxMessages {
+            conversationHistory = Array(conversationHistory.suffix(maxMessages))
+        }
     }
 }
 
 // MARK: - Codable Models
 
-private struct OllamaGenerateRequest: Encodable {
+struct ChatMessage: Codable {
+    let role: String
+    let content: String
+    let images: [String]?
+
+    enum CodingKeys: String, CodingKey {
+        case role, content, images
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(role, forKey: .role)
+        try container.encode(content, forKey: .content)
+        // Only encode images if non-nil and non-empty
+        if let images, !images.isEmpty {
+            try container.encode(images, forKey: .images)
+        }
+    }
+}
+
+private struct OllamaChatRequest: Encodable {
     let model: String
-    let prompt: String
-    let system: String
-    let images: [String]
+    let messages: [ChatMessage]
     let stream: Bool
 }
 
-struct OllamaGenerateResponse: Decodable {
+struct OllamaChatResponse: Decodable {
     let model: String?
-    let response: String
+    let message: ChatMessageResponse
     let done: Bool?
+}
 
-    enum CodingKeys: String, CodingKey {
-        case model, response, done
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        model = try container.decodeIfPresent(String.self, forKey: .model)
-        response = try container.decode(String.self, forKey: .response)
-        done = try container.decodeIfPresent(Bool.self, forKey: .done)
-    }
+struct ChatMessageResponse: Decodable {
+    let role: String
+    let content: String
 }
 
 private struct OllamaTagsResponse: Decodable {

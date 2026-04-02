@@ -26,6 +26,7 @@ class MainViewModel: ObservableObject {
     @Published var selectedAppName: String?
     @Published var selectedWindowTitle: String?
     @Published var videoAreaDescription: String?
+    @Published var hasConversationContext: Bool = false
 
     // MARK: - Inställningar (UserDefaults)
     @AppStorage("selectedModel") private var selectedModel = "ministral-3:latest"
@@ -35,6 +36,7 @@ class MainViewModel: ObservableObject {
     @AppStorage("useVoiceOver") private var useVoiceOver = false
     @AppStorage("detectionMethod") private var detectionMethodRaw = VideoDetectionMethod.smartBorder.rawValue
     @AppStorage("followFrontmost") private var followFrontmost = false
+    @AppStorage("useConversationContext") private var useConversationContext = true
 
     // MARK: - Private State
     private var captureManager: ScreenCaptureManager?
@@ -262,8 +264,12 @@ class MainViewModel: ObservableObject {
         // Send to Ollama
         do {
             ollamaClient.model = selectedModel
+            if !useConversationContext {
+                ollamaClient.resetConversation()
+            }
             let response = try await ollamaClient.describe(imageBase64: base64, prompt: defaultQuestion, system: systemPrompt)
             aiResponse = response
+            hasConversationContext = ollamaClient.hasConversationContext
             statusMessage = "Beskrivning klar."
             statusColor = .green
 
@@ -315,8 +321,16 @@ class MainViewModel: ObservableObject {
         aiResponse = ""
         detectionDiagnostics = ""
         videoPausedByUs = false
+        resetConversationContext()
         statusMessage = "Väntar på fönsterval..."
         statusColor = .orange
+    }
+
+    /// Clears the AI conversation history so the next description starts fresh
+    /// without any context from previous frames.
+    func resetConversationContext() {
+        ollamaClient.resetConversation()
+        hasConversationContext = false
     }
 
     // MARK: - Auto-Hotkey Flow (§ key)

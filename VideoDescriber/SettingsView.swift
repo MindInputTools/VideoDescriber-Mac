@@ -12,6 +12,7 @@ struct SettingsView: View {
     @AppStorage("speechRate") private var speechRate: Double = 175
     @AppStorage("detectionMethod") private var detectionMethod = VideoDetectionMethod.smartBorder.rawValue
     @AppStorage("followFrontmost") private var followFrontmost = false
+    @AppStorage("useConversationContext") private var useConversationContext = true
 
     @State private var availableModels: [String] = []
     @State private var isLoadingModels = false
@@ -89,6 +90,16 @@ struct SettingsView: View {
                     systemPrompt = SettingsView.defaultSystemPrompt
                 }
                 .font(.caption)
+            }
+
+            // --- Kontext ---
+            Section("Konversationskontext") {
+                Toggle("Använd kontext mellan beskrivningar", isOn: $useConversationContext)
+                Text(useConversationContext
+                     ? "AI:n kommer ihåg tidigare beskrivningar och fokuserar på vad som ändrats. Kan ge långsammare svar."
+                     : "Varje beskrivning är fristående utan koppling till tidigare. Snabbare svar.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
 
             // --- Tal ---

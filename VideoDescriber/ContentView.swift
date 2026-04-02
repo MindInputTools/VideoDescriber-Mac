@@ -120,6 +120,15 @@ struct ContentView: View {
                             .foregroundColor(.secondary)
                             .textCase(.uppercase)
                         Spacer()
+                        if viewModel.hasConversationContext {
+                            Button(action: { viewModel.resetConversationContext() }) {
+                                Label("Rensa kontext", systemImage: "eraser.line.dashed")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .accessibilityHint("Rensar AI-kontexten så nästa beskrivning börjar utan historik")
+                        }
                         // Stop speaking button — only shown while speech is active
                         Button(action: { viewModel.stopSpeaking() }) {
                             Label("Avbryt uppläsning", systemImage: "stop.fill")
