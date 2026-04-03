@@ -16,21 +16,23 @@ struct DescribeVideoIntent: AppIntent {
             return .result(dialog: "VideoDescriber är inte redo ännu. Öppna appen först.")
         }
 
-        // Capture frontmost app and window list before we do anything,
-        // same as the hotkey handler does.
-        let frontApp = NSWorkspace.shared.frontmostApplication
-        let cgWindows = CGWindowListCopyWindowInfo(
-            [.optionOnScreenOnly, .excludeDesktopElements],
-            kCGNullWindowID
-        ) as? [[CFString: Any]] ?? []
-
-        await vm.hotkeyTriggered(frontmostApp: frontApp, cgWindows: cgWindows)
-
-        let response = vm.aiResponse
-        if response.isEmpty {
-            return .result(dialog: "Kunde inte beskriva videon.")
+        // When triggered via Siri, the frontmost app is Siri itself, so we
+        // cannot reliably detect the video window. Instead, require that
+        // a window and video area have already been set up (via the § key
+        // or the app UI).
+        guard vm.hasCapture, vm.hasVideoArea else {
+            return .result(dialog: "Inget videofönster valt. Använd §-tangenten eller appen för att välja ett fönster först.")
         }
-        return .result(dialog: "\(response)")
+
+        // Fire off the describe work in a detached task so we can return
+        // to Siri immediately. The actual description will be spoken via
+        // AccessibilitySpeaker / VoiceOver — we don't need Siri to wait
+        // for the (potentially slow) AI response.
+        Task { @MainActor in
+            await vm.describe()
+        }
+
+        return .result(dialog: "Beskriver videon…")
     }
 }
 
