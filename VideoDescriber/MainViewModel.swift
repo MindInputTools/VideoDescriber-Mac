@@ -37,6 +37,7 @@ class MainViewModel: ObservableObject {
     @AppStorage("detectionMethod") private var detectionMethodRaw = VideoDetectionMethod.smartBorder.rawValue
     @AppStorage("followFrontmost") private var followFrontmost = false
     @AppStorage("useConversationContext") private var useConversationContext = true
+    @AppStorage("pauseVideoOnDescribe") private var pauseVideoOnDescribe = true
 
     // MARK: - Private State
     private var captureManager: ScreenCaptureManager?
@@ -240,8 +241,10 @@ class MainViewModel: ObservableObject {
         }
 
         // Pause the video *after* the screenshot so we don't capture player UI overlays
-        sendMediaPlayPause()
-        videoPausedByUs = true
+        if pauseVideoOnDescribe {
+            sendMediaPlayPause()
+            videoPausedByUs = true
+        }
 
         let willUseVoiceOver = useVoiceOver
 

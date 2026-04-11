@@ -13,6 +13,7 @@ struct SettingsView: View {
     @AppStorage("detectionMethod") private var detectionMethod = VideoDetectionMethod.smartBorder.rawValue
     @AppStorage("followFrontmost") private var followFrontmost = false
     @AppStorage("useConversationContext") private var useConversationContext = true
+    @AppStorage("pauseVideoOnDescribe") private var pauseVideoOnDescribe = true
 
     @State private var availableModels: [String] = []
     @State private var isLoadingModels = false
@@ -75,6 +76,16 @@ struct SettingsView: View {
                 Text(followFrontmost
                      ? "§-tangenten beskriver alltid det aktiva fönstret. Om du byter app omdetekteras videoområdet automatiskt."
                      : "§-tangenten håller sig till det ursprungligt valda fönstret tills du återställer manuellt.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            // --- Uppspelning ---
+            Section("Uppspelning") {
+                Toggle("Pausa video vid beskrivning", isOn: $pauseVideoOnDescribe)
+                Text(pauseVideoOnDescribe
+                     ? "Videon pausas automatiskt medan AI:n beskriver scenen och återupptas när talet är klart."
+                     : "Videon fortsätter spela medan beskrivningen görs och läses upp.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
