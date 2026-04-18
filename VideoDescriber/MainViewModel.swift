@@ -28,6 +28,8 @@ class MainViewModel: ObservableObject {
     @Published var videoAreaDescription: String?
     @Published var hasConversationContext: Bool = false
     @Published var isContinuousModeActive: Bool = false
+    @Published var sessionPrompt: String?
+    @Published var hasSessionPrompt: Bool = false
 
     // MARK: - Inställningar (UserDefaults)
     @AppStorage("selectedModel") private var selectedModel = "ministral-3:latest"
@@ -69,6 +71,9 @@ class MainViewModel: ObservableObject {
     private var videoPausedByUs: Bool = false
     private var selectedPID: pid_t?
     private var continuousModeTask: Task<Void, Never>?
+    private var promptHotKeyRef: EventHotKeyRef?
+    private var promptPanel: NSPanel?
+    private var previousApp: NSRunningApplication?
 
     // MARK: - Window Picking
     func pickWindow() async {
@@ -274,7 +279,7 @@ class MainViewModel: ObservableObject {
             if !useConversationContext {
                 ollamaClient.resetConversation()
             }
-            let response = try await ollamaClient.describe(imageBase64: base64, prompt: defaultQuestion, system: systemPrompt)
+            let response = try await ollamaClient.describe(imageBase64: base64, prompt: sessionPrompt ?? defaultQuestion, system: systemPrompt)
             aiResponse = response
             hasConversationContext = ollamaClient.hasConversationContext
             statusMessage = "Beskrivning klar."
@@ -369,7 +374,7 @@ class MainViewModel: ObservableObject {
             if !useConversationContext {
                 ollamaClient.resetConversation()
             }
-            let response = try await ollamaClient.describe(imageBase64: base64, prompt: continuousModePrompt, system: systemPrompt)
+            let response = try await ollamaClient.describe(imageBase64: base64, prompt: sessionPrompt ?? continuousModePrompt, system: systemPrompt)
             aiResponse = response
             hasConversationContext = ollamaClient.hasConversationContext
 
@@ -433,16 +438,39 @@ class MainViewModel: ObservableObject {
         hasConversationContext = false
     }
 
-    // MARK: - Auto-Hotkey Flow (§ key)
+    // MARK: - Auto-Hotkey Flow (§ key, Shift-§ for custom prompt)
     func setupHotKey() {
-        // Register § as a global hotkey using Carbon
+        // Register § and Shift-§ as global hotkeys using Carbon
         var hotKeyID = EventHotKeyID()
         hotKeyID.signature = OSType("VDSC".fourCharCode)
         hotKeyID.id = 1
 
         let handler: EventHandlerUPP = { _, event, userData -> OSStatus in
-            guard let ctx = userData else { return noErr }
+            guard let ctx = userData, let event = event else { return noErr }
             let vm = Unmanaged<MainViewModel>.fromOpaque(ctx).takeUnretainedValue()
+
+            // Extract hotkey ID to determine which hotkey was pressed
+            var pressedHotKeyID = EventHotKeyID()
+            let status = GetEventParameter(
+                event,
+                EventParamName(kEventParamDirectObject),
+                EventParamType(typeEventHotKeyID),
+                nil,
+                MemoryLayout<EventHotKeyID>.size,
+                nil,
+                &pressedHotKeyID
+            )
+            guard status == noErr else { return noErr }
+
+            if pressedHotKeyID.id == 2 {
+                // Shift-§: show custom prompt panel
+                Task { @MainActor in
+                    vm.showCustomPromptPanel()
+                }
+                return noErr
+            }
+
+            // id == 1: regular § key — existing behavior
             // Capture the frontmost app synchronously before async dispatch,
             // because once our app processes the hotkey we become frontmost.
             let frontApp = NSWorkspace.shared.frontmostApplication
@@ -460,6 +488,12 @@ class MainViewModel: ObservableObject {
 
         // § = kVK_ISO_Section (0x0A), no modifiers
         RegisterEventHotKey(UInt32(kVK_ISO_Section), 0, hotKeyID, GetApplicationEventTarget(), 0, &hotKeyRef)
+
+        // Shift-§ = kVK_ISO_Section with shift modifier
+        var promptHotKeyID = EventHotKeyID()
+        promptHotKeyID.signature = OSType("VDSC".fourCharCode)
+        promptHotKeyID.id = 2
+        RegisterEventHotKey(UInt32(kVK_ISO_Section), UInt32(shiftKey), promptHotKeyID, GetApplicationEventTarget(), 0, &promptHotKeyRef)
     }
 
     func hotkeyTriggered(frontmostApp: NSRunningApplication?, cgWindows: [[CFString: Any]]) async {
@@ -575,6 +609,78 @@ class MainViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Custom Session Prompt Panel
+
+    func showCustomPromptPanel() {
+        // If panel already visible, toggle it off
+        if let existingPanel = promptPanel, existingPanel.isVisible {
+            existingPanel.close()
+            reactivatePreviousApp()
+            promptPanel = nil
+            return
+        }
+
+        // Remember which app was active so we can switch back
+        previousApp = NSWorkspace.shared.frontmostApplication
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 300),
+            styleMask: [.titled, .closable, .nonactivatingPanel, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "Anpassad prompt för denna session"
+        panel.level = .floating
+        panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = false
+        panel.center()
+
+        let contentView = CustomPromptPanelView(
+            currentPrompt: sessionPrompt ?? "",
+            hasSessionPrompt: sessionPrompt != nil,
+            onApply: { [weak self] prompt in
+                self?.setSessionPrompt(prompt)
+                panel.close()
+                self?.reactivatePreviousApp()
+                self?.promptPanel = nil
+            },
+            onRemove: { [weak self] in
+                self?.setSessionPrompt(nil)
+                panel.close()
+                self?.reactivatePreviousApp()
+                self?.promptPanel = nil
+            },
+            onCancel: { [weak self] in
+                panel.close()
+                self?.reactivatePreviousApp()
+                self?.promptPanel = nil
+            }
+        )
+
+        panel.contentView = NSHostingView(rootView: contentView)
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+
+        self.promptPanel = panel
+    }
+
+    private func setSessionPrompt(_ prompt: String?) {
+        if let prompt, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            sessionPrompt = prompt
+            hasSessionPrompt = true
+        } else {
+            sessionPrompt = nil
+            hasSessionPrompt = false
+        }
+    }
+
+    private func reactivatePreviousApp() {
+        if let app = previousApp, app.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+            app.activate()
+        }
+        previousApp = nil
+    }
+
     // MARK: - Media Key Simulation
 
     /// Sends a system-wide media Play/Pause key event (same as the physical ⏯ key).
@@ -645,6 +751,69 @@ class MainViewModel: ObservableObject {
             return nil
         }
         return jpegData.base64EncodedString()
+    }
+}
+
+// MARK: - Custom Prompt Panel View
+
+struct CustomPromptPanelView: View {
+    @State var promptText: String
+    let hasSessionPrompt: Bool
+    let onApply: (String) -> Void
+    let onRemove: () -> Void
+    let onCancel: () -> Void
+
+    init(currentPrompt: String, hasSessionPrompt: Bool,
+         onApply: @escaping (String) -> Void,
+         onRemove: @escaping () -> Void,
+         onCancel: @escaping () -> Void) {
+        self._promptText = State(initialValue: currentPrompt)
+        self.hasSessionPrompt = hasSessionPrompt
+        self.onApply = onApply
+        self.onRemove = onRemove
+        self.onCancel = onCancel
+    }
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("Anpassad prompt (gäller denna session)")
+                .font(.headline)
+
+            Text("Skriv en prompt som ersätter standardfrågan under resten av sessionen. Fungerar i både vanligt och kontinuerligt läge.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+
+            TextEditor(text: $promptText)
+                .font(.body)
+                .frame(minHeight: 100)
+                .border(Color.secondary.opacity(0.3))
+
+            HStack {
+                if hasSessionPrompt {
+                    Button("Ta bort anpassad prompt") {
+                        onRemove()
+                    }
+                    .foregroundColor(.red)
+                }
+
+                Spacer()
+
+                Button("Avbryt") {
+                    onCancel()
+                }
+                .keyboardShortcut(.escape)
+
+                Button("Använd") {
+                    onApply(promptText)
+                }
+                .keyboardShortcut(.return)
+                .buttonStyle(.borderedProminent)
+                .disabled(promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding()
+        .frame(width: 480, height: 280)
     }
 }
 

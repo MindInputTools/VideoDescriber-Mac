@@ -161,6 +161,21 @@ struct ContentView: View {
                 }
             }
 
+            // Session prompt indicator
+            if viewModel.hasSessionPrompt {
+                HStack {
+                    Image(systemName: "text.quote")
+                        .foregroundColor(.blue)
+                    Text("Anpassad sessionprompt aktiv")
+                        .font(.caption)
+                        .foregroundColor(.blue)
+                    Text("(⇧§ för att ändra)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal)
+            }
+
             // Continuous mode indicator
             if viewModel.isContinuousModeActive {
                 HStack {
