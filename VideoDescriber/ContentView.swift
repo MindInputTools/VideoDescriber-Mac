@@ -161,11 +161,33 @@ struct ContentView: View {
                 }
             }
 
-            Text("Tryck § för att automatiskt analysera aktivt fönster")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
+            // Continuous mode indicator
+            if viewModel.isContinuousModeActive {
+                HStack {
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 8, height: 8)
+                    Text("Kontinuerligt läge aktivt — tryck § för att stoppa")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
                 .padding(.horizontal)
+
+                Button(action: { viewModel.stopContinuousMode() }) {
+                    Label("Stoppa kontinuerligt läge", systemImage: "stop.circle.fill")
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                }
+                .buttonStyle(.bordered)
+                .tint(.red)
+                .padding(.horizontal)
+            } else {
+                Text("Tryck § för att automatiskt analysera aktivt fönster")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+            }
 
             // Diagnostics toggle — only shown after a calibration has produced data
             if !viewModel.detectionDiagnostics.isEmpty {

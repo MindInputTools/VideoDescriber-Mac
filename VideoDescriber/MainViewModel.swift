@@ -27,6 +27,7 @@ class MainViewModel: ObservableObject {
     @Published var selectedWindowTitle: String?
     @Published var videoAreaDescription: String?
     @Published var hasConversationContext: Bool = false
+    @Published var isContinuousModeActive: Bool = false
 
     // MARK: - Inställningar (UserDefaults)
     @AppStorage("selectedModel") private var selectedModel = "ministral-3:latest"
@@ -38,6 +39,8 @@ class MainViewModel: ObservableObject {
     @AppStorage("followFrontmost") private var followFrontmost = false
     @AppStorage("useConversationContext") private var useConversationContext = true
     @AppStorage("pauseVideoOnDescribe") private var pauseVideoOnDescribe = true
+    @AppStorage("continuousModeEnabled") private var continuousModeEnabled = false
+    @AppStorage("continuousModePrompt") private var continuousModePrompt = SettingsView.defaultContinuousModePrompt
 
     // MARK: - Private State
     private var captureManager: ScreenCaptureManager?
@@ -65,6 +68,7 @@ class MainViewModel: ObservableObject {
     private var hotKeyRef: EventHotKeyRef?
     private var videoPausedByUs: Bool = false
     private var selectedPID: pid_t?
+    private var continuousModeTask: Task<Void, Never>?
 
     // MARK: - Window Picking
     func pickWindow() async {
@@ -302,6 +306,98 @@ class MainViewModel: ObservableObject {
         isDescribing = false
     }
 
+    // MARK: - Continuous Mode
+
+    /// Starts the continuous description loop. Captures a frame, describes it,
+    /// speaks the result, waits for speech to finish, then repeats.
+    func startContinuousMode() {
+        guard !isContinuousModeActive else { return }
+        isContinuousModeActive = true
+        statusMessage = "Kontinuerligt läge startat"
+        statusColor = .green
+
+        continuousModeTask = Task {
+            // Ensure we have a capture and video area before looping
+            if captureManager == nil || !hasVideoArea {
+                // Will be set up by the hotkey flow that calls this
+            }
+
+            while !Task.isCancelled && isContinuousModeActive {
+                await describeContinuous()
+                if Task.isCancelled || !isContinuousModeActive { break }
+
+                // Wait for speech to finish before capturing next frame
+                await waitForSpeechToFinish()
+            }
+        }
+    }
+
+    /// Stops the continuous description loop.
+    func stopContinuousMode() {
+        isContinuousModeActive = false
+        continuousModeTask?.cancel()
+        continuousModeTask = nil
+        stopSpeaking()
+        statusMessage = "Kontinuerligt läge stoppat"
+        statusColor = .orange
+    }
+
+    /// Describes the current scene without pausing video, using the continuous mode prompt.
+    private func describeContinuous() async {
+        guard let manager = captureManager, hasVideoArea else { return }
+        isDescribing = true
+
+        guard let fullFrame = try? await manager.captureScreenshot() else {
+            isDescribing = false
+            return
+        }
+
+        let willUseVoiceOver = useVoiceOver
+
+        guard let cropped = cropImage(fullFrame, to: videoArea) else {
+            isDescribing = false
+            return
+        }
+
+        guard let base64 = imageToBase64JPEG(cropped) else {
+            isDescribing = false
+            return
+        }
+
+        do {
+            ollamaClient.model = selectedModel
+            if !useConversationContext {
+                ollamaClient.resetConversation()
+            }
+            let response = try await ollamaClient.describe(imageBase64: base64, prompt: continuousModePrompt, system: systemPrompt)
+            aiResponse = response
+            hasConversationContext = ollamaClient.hasConversationContext
+
+            // Speak without any video pause/resume logic
+            let onSpeechFinished: (() -> Void)? = willUseVoiceOver ? nil : { [weak self] in
+                self?.isSpeaking = false
+            }
+
+            AccessibilitySpeaker.shared.speak(response, viaVoiceOver: willUseVoiceOver, onFinished: onSpeechFinished)
+            isSpeaking = !willUseVoiceOver
+        } catch {
+            if !Task.isCancelled {
+                statusMessage = "AI-fel: \(error.localizedDescription)"
+                statusColor = .red
+            }
+        }
+
+        isDescribing = false
+    }
+
+    /// Waits until the current speech output has finished.
+    private func waitForSpeechToFinish() async {
+        // Poll isSpeaking state — the AccessibilitySpeaker callbacks update it on MainActor
+        while isSpeaking && !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+        }
+    }
+
     /// Stop any ongoing speech (called from the UI stop button or § key re-press).
     /// The AccessibilitySpeaker.stop() triggers onFinished, which handles video resume
     /// for system speech. For VoiceOver mode videoPausedByUs is already false.
@@ -312,6 +408,7 @@ class MainViewModel: ObservableObject {
 
     /// Resets window selection and video area so the user can pick a new target.
     func resetSelection() {
+        if isContinuousModeActive { stopContinuousMode() }
         stopSpeaking()
         captureManager = nil
         hasCapture = false
@@ -366,6 +463,35 @@ class MainViewModel: ObservableObject {
     }
 
     func hotkeyTriggered(frontmostApp: NSRunningApplication?, cgWindows: [[CFString: Any]]) async {
+        // If continuous mode is enabled in settings, § toggles continuous mode on/off
+        if continuousModeEnabled {
+            if isContinuousModeActive {
+                stopContinuousMode()
+                return
+            }
+
+            // Ensure we have a capture target and video area before starting
+            if followFrontmost,
+               captureManager != nil,
+               let frontPID = frontmostApp?.processIdentifier,
+               frontPID != ProcessInfo.processInfo.processIdentifier,
+               frontPID != selectedPID {
+                resetSelection()
+            }
+
+            if captureManager == nil {
+                await autoCaptureFrontWindow(frontmostApp: frontmostApp, cgWindows: cgWindows)
+            }
+            if !hasVideoArea {
+                await calibrate()
+            }
+            guard hasVideoArea else { return }
+
+            startContinuousMode()
+            return
+        }
+
+        // Non-continuous mode: original behavior
         // If currently speaking (system speech), § stops speech and resumes video
         if isSpeaking {
             stopSpeaking()

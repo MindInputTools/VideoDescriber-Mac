@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     static let defaultSystemPrompt = "Du är en professionell syntolk. Beskriv bilden kort och objektivt för en person med synnedsättning. Svara direkt på svenska."
     static let defaultDefaultQuestion = "Utför din uppgift enligt din systemroll"
+    static let defaultContinuousModePrompt = "Du är en professionell syntolk i kontinuerligt läge. Beskriv kort vad som händer just nu i bilden. Fokusera på förändringar och rörelser. Svara direkt på svenska, max 2-3 meningar."
     @AppStorage("selectedModel") private var selectedModel = "ministral-3:latest"
     @AppStorage("systemPrompt") private var systemPrompt = SettingsView.defaultSystemPrompt
     @AppStorage("defaultQuestion") private var defaultQuestion =
@@ -14,6 +15,8 @@ struct SettingsView: View {
     @AppStorage("followFrontmost") private var followFrontmost = false
     @AppStorage("useConversationContext") private var useConversationContext = true
     @AppStorage("pauseVideoOnDescribe") private var pauseVideoOnDescribe = true
+    @AppStorage("continuousModeEnabled") private var continuousModeEnabled = false
+    @AppStorage("continuousModePrompt") private var continuousModePrompt = SettingsView.defaultContinuousModePrompt
 
     @State private var availableModels: [String] = []
     @State private var isLoadingModels = false
@@ -88,6 +91,30 @@ struct SettingsView: View {
                      : "Videon fortsätter spela medan beskrivningen görs och läses upp.")
                     .font(.caption)
                     .foregroundColor(.secondary)
+            }
+
+            // --- Kontinuerligt läge ---
+            Section("Kontinuerligt läge") {
+                Toggle("Aktivera kontinuerligt läge", isOn: $continuousModeEnabled)
+                Text(continuousModeEnabled
+                     ? "§-tangenten startar och stoppar kontinuerligt läge. Beskrivningar genereras automatiskt — nästa bild tas när föregående uppläsning är klar. Videon pausas inte."
+                     : "Kontinuerligt läge är avstängt. §-tangenten fungerar som vanligt.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                if continuousModeEnabled {
+                    Text("Prompt för kontinuerligt läge")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    TextEditor(text: $continuousModePrompt)
+                        .font(.body)
+                        .frame(minHeight: 60)
+                        .border(Color.secondary.opacity(0.3))
+                    Button("Återställ standard") {
+                        continuousModePrompt = SettingsView.defaultContinuousModePrompt
+                    }
+                    .font(.caption)
+                }
             }
 
             // --- Systemprompt ---
