@@ -30,6 +30,7 @@ class MainViewModel: ObservableObject {
     @Published var isContinuousModeActive: Bool = false
     @Published var sessionPrompt: String?
     @Published var hasSessionPrompt: Bool = false
+    @Published var lastCapturedImageBase64: String?
 
     // MARK: - Inställningar (UserDefaults)
     @AppStorage("selectedModel") private var selectedModel = "ministral-3:latest"
@@ -72,8 +73,12 @@ class MainViewModel: ObservableObject {
     private var selectedPID: pid_t?
     private var continuousModeTask: Task<Void, Never>?
     private var promptHotKeyRef: EventHotKeyRef?
+    private var questionHotKeyRef: EventHotKeyRef?
     private var promptPanel: NSPanel?
+    private var questionPanel: NSPanel?
     private var previousApp: NSRunningApplication?
+    /// Separate OllamaClient for "question on image" so it doesn't pollute the main conversation context.
+    private var questionOllamaClient = OllamaClient()
 
     // MARK: - Window Picking
     func pickWindow() async {
@@ -273,6 +278,9 @@ class MainViewModel: ObservableObject {
             return
         }
 
+        // Store last image for "question on image" feature
+        lastCapturedImageBase64 = base64
+
         // Send to Ollama
         do {
             ollamaClient.model = selectedModel
@@ -368,6 +376,9 @@ class MainViewModel: ObservableObject {
             isDescribing = false
             return
         }
+
+        // Store last image for "question on image" feature
+        lastCapturedImageBase64 = base64
 
         do {
             ollamaClient.model = selectedModel
@@ -470,6 +481,14 @@ class MainViewModel: ObservableObject {
                 return noErr
             }
 
+            if pressedHotKeyID.id == 3 {
+                // Option-§: question on last image
+                Task { @MainActor in
+                    vm.showQuestionOnImagePanel()
+                }
+                return noErr
+            }
+
             // id == 1: regular § key — existing behavior
             // Capture the frontmost app synchronously before async dispatch,
             // because once our app processes the hotkey we become frontmost.
@@ -494,6 +513,12 @@ class MainViewModel: ObservableObject {
         promptHotKeyID.signature = OSType("VDSC".fourCharCode)
         promptHotKeyID.id = 2
         RegisterEventHotKey(UInt32(kVK_ISO_Section), UInt32(shiftKey), promptHotKeyID, GetApplicationEventTarget(), 0, &promptHotKeyRef)
+
+        // Option-§ = kVK_ISO_Section with option modifier
+        var questionHotKeyID = EventHotKeyID()
+        questionHotKeyID.signature = OSType("VDSC".fourCharCode)
+        questionHotKeyID.id = 3
+        RegisterEventHotKey(UInt32(kVK_ISO_Section), UInt32(optionKey), questionHotKeyID, GetApplicationEventTarget(), 0, &questionHotKeyRef)
     }
 
     func hotkeyTriggered(frontmostApp: NSRunningApplication?, cgWindows: [[CFString: Any]]) async {
@@ -674,6 +699,95 @@ class MainViewModel: ObservableObject {
         }
     }
 
+    // MARK: - Question on Last Image Panel
+
+    func showQuestionOnImagePanel() {
+        // If panel already visible, toggle it off
+        if let existingPanel = questionPanel, existingPanel.isVisible {
+            existingPanel.close()
+            reactivatePreviousApp()
+            questionPanel = nil
+            return
+        }
+
+        guard lastCapturedImageBase64 != nil else {
+            statusMessage = "Ingen bild tagen ännu — beskriv en scen först."
+            statusColor = .orange
+            return
+        }
+
+        // Remember which app was active so we can switch back
+        previousApp = NSWorkspace.shared.frontmostApplication
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 400),
+            styleMask: [.titled, .closable, .resizable, .nonactivatingPanel, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "Fråga om senaste bilden"
+        panel.level = .floating
+        panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = false
+        panel.center()
+
+        let contentView = QuestionOnImagePanelView(
+            onAsk: { [weak self] question, showOnScreen in
+                guard let self else { return }
+                Task { @MainActor in
+                    await self.askQuestionOnImage(question: question, showOnScreen: showOnScreen)
+                }
+            },
+            onClose: { [weak self] in
+                panel.close()
+                self?.reactivatePreviousApp()
+                self?.questionPanel = nil
+            },
+            viewModel: self
+        )
+
+        panel.contentView = NSHostingView(rootView: contentView)
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+
+        self.questionPanel = panel
+    }
+
+    /// Ask a question about the last captured image using a separate OllamaClient.
+    @Published var questionAnswer: String = ""
+    @Published var isAskingQuestion: Bool = false
+
+    func askQuestionOnImage(question: String, showOnScreen: Bool) async {
+        guard let imageBase64 = lastCapturedImageBase64 else { return }
+
+        isAskingQuestion = true
+        questionAnswer = ""
+
+        do {
+            questionOllamaClient.model = selectedModel
+            questionOllamaClient.resetConversation()
+            let answer = try await questionOllamaClient.describe(
+                imageBase64: imageBase64,
+                prompt: question,
+                system: systemPrompt
+            )
+            questionAnswer = answer
+
+            if !showOnScreen {
+                let willUseVoiceOver = useVoiceOver
+                let onSpeechFinished: (() -> Void)? = willUseVoiceOver ? nil : { [weak self] in
+                    self?.isSpeaking = false
+                }
+                AccessibilitySpeaker.shared.speak(answer, viaVoiceOver: willUseVoiceOver, onFinished: onSpeechFinished)
+                isSpeaking = !willUseVoiceOver
+            }
+        } catch {
+            questionAnswer = "Fel: \(error.localizedDescription)"
+        }
+
+        isAskingQuestion = false
+    }
+
     private func reactivatePreviousApp() {
         if let app = previousApp, app.processIdentifier != ProcessInfo.processInfo.processIdentifier {
             app.activate()
@@ -814,6 +928,78 @@ struct CustomPromptPanelView: View {
         }
         .padding()
         .frame(width: 480, height: 280)
+    }
+}
+
+// MARK: - Question on Image Panel View
+
+struct QuestionOnImagePanelView: View {
+    @State private var questionText: String = ""
+    @State private var showOnScreen: Bool = false
+    let onAsk: (String, Bool) -> Void
+    let onClose: () -> Void
+    @ObservedObject var viewModel: MainViewModel
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("Ställ en fråga om senaste bilden")
+                .font(.headline)
+
+            Text("Skriv din fråga nedan. Svaret påverkar inte de vanliga promptsen.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+
+            TextField("Din fråga...", text: $questionText)
+                .textFieldStyle(.roundedBorder)
+
+            Toggle("Visa svar på skärmen istället för att läsa upp", isOn: $showOnScreen)
+                .toggleStyle(.checkbox)
+
+            if viewModel.isAskingQuestion {
+                ProgressView("Analyserar...")
+                    .progressViewStyle(.linear)
+            }
+
+            // Show answer on screen when checkbox is selected
+            if showOnScreen && !viewModel.questionAnswer.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Svar")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .textCase(.uppercase)
+
+                    ScrollView {
+                        Text(viewModel.questionAnswer)
+                            .font(.body)
+                            .padding(8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                    .frame(minHeight: 60, maxHeight: 200)
+                    .background(Color(nsColor: .textBackgroundColor))
+                    .cornerRadius(8)
+                }
+            }
+
+            HStack {
+                Spacer()
+
+                Button("Stäng") {
+                    onClose()
+                }
+                .keyboardShortcut(.escape)
+
+                Button("Fråga") {
+                    onAsk(questionText, showOnScreen)
+                }
+                .keyboardShortcut(.return)
+                .buttonStyle(.borderedProminent)
+                .disabled(questionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || viewModel.isAskingQuestion)
+            }
+        }
+        .padding()
+        .frame(minWidth: 500, minHeight: 250)
     }
 }
 
