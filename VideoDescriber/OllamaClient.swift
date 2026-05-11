@@ -82,8 +82,8 @@ class OllamaClient {
         return decoded.models.map { $0.name }
     }
 
-    /// Stream a description, calling the update closure for each token.
-    func describeStreaming(imageBase64: String, prompt: String, system: String, onUpdate: @escaping (String) -> Void) async throws -> String {
+    /// Stream a description, calling the token closure with each individual token as it arrives.
+    func describeStreaming(imageBase64: String, prompt: String, system: String, onToken: @escaping (String) -> Void) async throws -> String {
         let endpoint = baseURL.appendingPathComponent("api/chat")
 
         var messages: [ChatMessage] = [
@@ -117,8 +117,9 @@ class OllamaClient {
                 continue
             }
 
-            fullResponse += chunk.message.content
-            await MainActor.run { onUpdate(fullResponse) }
+            let token = chunk.message.content
+            fullResponse += token
+            await MainActor.run { onToken(token) }
 
             if chunk.done == true { break }
         }

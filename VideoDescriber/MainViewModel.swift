@@ -281,21 +281,13 @@ class MainViewModel: ObservableObject {
         // Store last image for "question on image" feature
         lastCapturedImageBase64 = base64
 
-        // Send to Ollama
+        // Send to Ollama with streaming speech
         do {
             ollamaClient.model = selectedModel
             if !useConversationContext {
                 ollamaClient.resetConversation()
             }
-            let response = try await ollamaClient.describe(imageBase64: base64, prompt: sessionPrompt ?? defaultQuestion, system: systemPrompt)
-            aiResponse = response
-            hasConversationContext = ollamaClient.hasConversationContext
-            statusMessage = "Beskrivning klar."
-            statusColor = .green
 
-            // When using VoiceOver: no auto-resume (user resumes manually).
-            // When using system speech: auto-resume when speech finishes,
-            // and § key can stop speech early (which also resumes).
             let onSpeechFinished: (() -> Void)? = willUseVoiceOver ? nil : { [weak self] in
                 self?.isSpeaking = false
                 if self?.videoPausedByUs == true {
@@ -304,15 +296,40 @@ class MainViewModel: ObservableObject {
                 }
             }
 
-            AccessibilitySpeaker.shared.speak(response, viaVoiceOver: willUseVoiceOver, onFinished: onSpeechFinished)
-            isSpeaking = !willUseVoiceOver  // Only track speaking state for system speech
+            let speaker = AccessibilitySpeaker.shared
+            speaker.beginStreaming(viaVoiceOver: willUseVoiceOver, onFinished: onSpeechFinished)
+            isSpeaking = !willUseVoiceOver
+
+            let chunker = SentenceChunker()
+
+            let response = try await ollamaClient.describeStreaming(
+                imageBase64: base64,
+                prompt: sessionPrompt ?? defaultQuestion,
+                system: systemPrompt
+            ) { [weak self] token in
+                self?.aiResponse += token
+                for sentence in chunker.addToken(token) {
+                    speaker.enqueueSpeechChunk(sentence)
+                }
+            }
+
+            if let remaining = chunker.flush() {
+                speaker.enqueueSpeechChunk(remaining)
+            }
+            speaker.endStreaming()
+
+            aiResponse = response
+            hasConversationContext = ollamaClient.hasConversationContext
+            statusMessage = "Beskrivning klar."
+            statusColor = .green
+
             if willUseVoiceOver {
-                // VoiceOver: video stays paused, user resumes manually
                 videoPausedByUs = false
             }
         } catch {
             statusMessage = "AI-fel: \(error.localizedDescription)"
             statusColor = .red
+            AccessibilitySpeaker.shared.stop()
             if videoPausedByUs { sendMediaPlayPause(); videoPausedByUs = false }
         }
 
@@ -385,22 +402,42 @@ class MainViewModel: ObservableObject {
             if !useConversationContext {
                 ollamaClient.resetConversation()
             }
-            let response = try await ollamaClient.describe(imageBase64: base64, prompt: sessionPrompt ?? continuousModePrompt, system: systemPrompt)
-            aiResponse = response
-            hasConversationContext = ollamaClient.hasConversationContext
 
-            // Speak without any video pause/resume logic
             let onSpeechFinished: (() -> Void)? = willUseVoiceOver ? nil : { [weak self] in
                 self?.isSpeaking = false
             }
 
-            AccessibilitySpeaker.shared.speak(response, viaVoiceOver: willUseVoiceOver, onFinished: onSpeechFinished)
+            let speaker = AccessibilitySpeaker.shared
+            speaker.beginStreaming(viaVoiceOver: willUseVoiceOver, onFinished: onSpeechFinished)
             isSpeaking = !willUseVoiceOver
+
+            let chunker = SentenceChunker()
+            aiResponse = ""
+
+            let response = try await ollamaClient.describeStreaming(
+                imageBase64: base64,
+                prompt: sessionPrompt ?? continuousModePrompt,
+                system: systemPrompt
+            ) { [weak self] token in
+                self?.aiResponse += token
+                for sentence in chunker.addToken(token) {
+                    speaker.enqueueSpeechChunk(sentence)
+                }
+            }
+
+            if let remaining = chunker.flush() {
+                speaker.enqueueSpeechChunk(remaining)
+            }
+            speaker.endStreaming()
+
+            aiResponse = response
+            hasConversationContext = ollamaClient.hasConversationContext
         } catch {
             if !Task.isCancelled {
                 statusMessage = "AI-fel: \(error.localizedDescription)"
                 statusColor = .red
             }
+            AccessibilitySpeaker.shared.stop()
         }
 
         isDescribing = false
@@ -1000,6 +1037,58 @@ struct QuestionOnImagePanelView: View {
         }
         .padding()
         .frame(minWidth: 500, minHeight: 250)
+    }
+}
+
+// MARK: - Sentence Chunker
+
+/// Buffers streaming tokens and extracts natural speech chunks.
+/// Splits on sentence-ending punctuation (.!?) followed by whitespace, or on newlines.
+/// For long single sentences, also splits at clause boundaries (comma, semicolon, colon)
+/// once the buffer exceeds a minimum length, so speech can start before the full response arrives.
+private class SentenceChunker {
+    private var buffer = ""
+    private let minClauseChunkLength = 60
+
+    func addToken(_ token: String) -> [String] {
+        buffer += token
+        var chunks: [String] = []
+
+        while true {
+            if let match = buffer.range(of: #"[.!?]\s|\n"#, options: .regularExpression) {
+                let isNewline = buffer[match.lowerBound] == "\n"
+                let chunkEnd = isNewline ? match.lowerBound : buffer.index(after: match.lowerBound)
+                let chunk = String(buffer[buffer.startIndex..<chunkEnd])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !chunk.isEmpty {
+                    chunks.append(chunk)
+                }
+                buffer = String(buffer[match.upperBound...])
+                continue
+            }
+
+            if buffer.count >= minClauseChunkLength,
+               let match = buffer.range(of: #"[,;:]\s"#, options: .regularExpression) {
+                let chunkEnd = buffer.index(after: match.lowerBound)
+                let chunk = String(buffer[buffer.startIndex..<chunkEnd])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !chunk.isEmpty {
+                    chunks.append(chunk)
+                }
+                buffer = String(buffer[match.upperBound...])
+                continue
+            }
+
+            break
+        }
+
+        return chunks
+    }
+
+    func flush() -> String? {
+        let remaining = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        buffer = ""
+        return remaining.isEmpty ? nil : remaining
     }
 }
 
