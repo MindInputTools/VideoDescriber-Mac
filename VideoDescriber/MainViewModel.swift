@@ -33,6 +33,7 @@ class MainViewModel: ObservableObject {
     @Published var lastCapturedImageBase64: String?
 
     // MARK: - Inställningar (UserDefaults)
+    @AppStorage("openAIBaseURL") private var openAIBaseURL = OpenAICompatibleClient.defaultBaseURLString
     @AppStorage("selectedModel") private var selectedModel = "ministral-3:latest"
     @AppStorage("systemPrompt") private var systemPrompt = SettingsView.defaultSystemPrompt
     @AppStorage("defaultQuestion") private var defaultQuestion =
@@ -49,7 +50,7 @@ class MainViewModel: ObservableObject {
     private var captureManager: ScreenCaptureManager?
     private let smartBorderDetector = SmartBorderDetector()
     private let motionDetector = VideoMotionDetector()
-    private var ollamaClient = OllamaClient()
+    private var aiClient = OpenAICompatibleClient()
 
     private var activeDetector: VideoAreaDetecting {
         let method = VideoDetectionMethod(rawValue: detectionMethodRaw) ?? .smartBorder
@@ -77,8 +78,8 @@ class MainViewModel: ObservableObject {
     private var promptPanel: NSPanel?
     private var questionPanel: NSPanel?
     private var previousApp: NSRunningApplication?
-    /// Separate OllamaClient for "question on image" so it doesn't pollute the main conversation context.
-    private var questionOllamaClient = OllamaClient()
+    /// Separate AI client for "question on image" so it doesn't pollute the main conversation context.
+    private var questionAIClient = OpenAICompatibleClient()
 
     // MARK: - Window Picking
     func pickWindow() async {
@@ -281,28 +282,26 @@ class MainViewModel: ObservableObject {
         // Store last image for "question on image" feature
         lastCapturedImageBase64 = base64
 
-        // Send to Ollama with streaming speech
+        // Send to the OpenAI-compatible endpoint with streaming speech
         do {
-            ollamaClient.model = selectedModel
+            try configureClient(aiClient)
             if !useConversationContext {
-                ollamaClient.resetConversation()
+                aiClient.resetConversation()
             }
 
-            let onSpeechFinished: (() -> Void)? = willUseVoiceOver ? nil : { [weak self] in
+            let speaker = AccessibilitySpeaker.shared
+            speaker.beginStreaming(viaVoiceOver: willUseVoiceOver) { [weak self] in
                 self?.isSpeaking = false
                 if self?.videoPausedByUs == true {
                     self?.sendMediaPlayPause()
                     self?.videoPausedByUs = false
                 }
             }
-
-            let speaker = AccessibilitySpeaker.shared
-            speaker.beginStreaming(viaVoiceOver: willUseVoiceOver, onFinished: onSpeechFinished)
-            isSpeaking = !willUseVoiceOver
+            isSpeaking = true
 
             let chunker = SentenceChunker()
 
-            let response = try await ollamaClient.describeStreaming(
+            let response = try await aiClient.describeStreaming(
                 imageBase64: base64,
                 prompt: sessionPrompt ?? defaultQuestion,
                 system: systemPrompt
@@ -319,13 +318,10 @@ class MainViewModel: ObservableObject {
             speaker.endStreaming()
 
             aiResponse = response
-            hasConversationContext = ollamaClient.hasConversationContext
+            hasConversationContext = aiClient.hasConversationContext
             statusMessage = "Beskrivning klar."
             statusColor = .green
 
-            if willUseVoiceOver {
-                videoPausedByUs = false
-            }
         } catch {
             statusMessage = "AI-fel: \(error.localizedDescription)"
             statusColor = .red
@@ -355,9 +351,6 @@ class MainViewModel: ObservableObject {
             while !Task.isCancelled && isContinuousModeActive {
                 await describeContinuous()
                 if Task.isCancelled || !isContinuousModeActive { break }
-
-                // Wait for speech to finish before capturing next frame
-                await waitForSpeechToFinish()
             }
         }
     }
@@ -398,23 +391,28 @@ class MainViewModel: ObservableObject {
         lastCapturedImageBase64 = base64
 
         do {
-            ollamaClient.model = selectedModel
+            try configureClient(aiClient)
             if !useConversationContext {
-                ollamaClient.resetConversation()
-            }
-
-            let onSpeechFinished: (() -> Void)? = willUseVoiceOver ? nil : { [weak self] in
-                self?.isSpeaking = false
+                aiClient.resetConversation()
             }
 
             let speaker = AccessibilitySpeaker.shared
-            speaker.beginStreaming(viaVoiceOver: willUseVoiceOver, onFinished: onSpeechFinished)
-            isSpeaking = !willUseVoiceOver
-
             let chunker = SentenceChunker()
             aiResponse = ""
+            isSpeaking = true
 
-            let response = try await ollamaClient.describeStreaming(
+            let speechFinished = AsyncStream<Void> { continuation in
+                var didFinish = false
+                speaker.beginStreaming(viaVoiceOver: willUseVoiceOver) { [weak self] in
+                    self?.isSpeaking = false
+                    guard !didFinish else { return }
+                    didFinish = true
+                    continuation.yield(())
+                    continuation.finish()
+                }
+            }
+
+            let response = try await aiClient.describeStreaming(
                 imageBase64: base64,
                 prompt: sessionPrompt ?? continuousModePrompt,
                 system: systemPrompt
@@ -430,8 +428,12 @@ class MainViewModel: ObservableObject {
             }
             speaker.endStreaming()
 
+            for await _ in speechFinished {
+                break
+            }
+
             aiResponse = response
-            hasConversationContext = ollamaClient.hasConversationContext
+            hasConversationContext = aiClient.hasConversationContext
         } catch {
             if !Task.isCancelled {
                 statusMessage = "AI-fel: \(error.localizedDescription)"
@@ -443,13 +445,6 @@ class MainViewModel: ObservableObject {
         isDescribing = false
     }
 
-    /// Waits until the current speech output has finished.
-    private func waitForSpeechToFinish() async {
-        // Poll isSpeaking state — the AccessibilitySpeaker callbacks update it on MainActor
-        while isSpeaking && !Task.isCancelled {
-            try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
-        }
-    }
 
     /// Stop any ongoing speech (called from the UI stop button or § key re-press).
     /// The AccessibilitySpeaker.stop() triggers onFinished, which handles video resume
@@ -482,7 +477,7 @@ class MainViewModel: ObservableObject {
     /// Clears the AI conversation history so the next description starts fresh
     /// without any context from previous frames.
     func resetConversationContext() {
-        ollamaClient.resetConversation()
+        aiClient.resetConversation()
         hasConversationContext = false
     }
 
@@ -790,7 +785,7 @@ class MainViewModel: ObservableObject {
         self.questionPanel = panel
     }
 
-    /// Ask a question about the last captured image using a separate OllamaClient.
+    /// Ask a question about the last captured image using a separate AI client.
     @Published var questionAnswer: String = ""
     @Published var isAskingQuestion: Bool = false
 
@@ -801,9 +796,9 @@ class MainViewModel: ObservableObject {
         questionAnswer = ""
 
         do {
-            questionOllamaClient.model = selectedModel
-            questionOllamaClient.resetConversation()
-            let answer = try await questionOllamaClient.describe(
+            try configureClient(questionAIClient)
+            questionAIClient.resetConversation()
+            let answer = try await questionAIClient.describe(
                 imageBase64: imageBase64,
                 prompt: question,
                 system: systemPrompt
@@ -871,6 +866,16 @@ class MainViewModel: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    private func configureClient(_ client: OpenAICompatibleClient) throws {
+        let trimmedBaseURL = openAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let baseURL = URL(string: trimmedBaseURL) else {
+            throw OpenAICompatibleError.invalidBaseURL(openAIBaseURL)
+        }
+
+        client.baseURL = baseURL
+        client.model = selectedModel
+    }
 
     /// Bygger fullständig prompt från systemprompt + valfri standardfråga.
     private func buildPrompt() -> String {

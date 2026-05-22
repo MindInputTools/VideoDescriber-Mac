@@ -21,6 +21,7 @@ class AccessibilitySpeaker: NSObject, NSSpeechSynthesizerDelegate {
     private var speechQueue: [String] = []
     private var isStreamingMode: Bool = false
     private var isStreamingDone: Bool = false
+    private var isSynthesizerChunkActive: Bool = false
 
     private override init() {
         super.init()
@@ -34,7 +35,7 @@ class AccessibilitySpeaker: NSObject, NSSpeechSynthesizerDelegate {
     /// Calling this while already speaking will interrupt the current output first.
     /// The optional `onFinished` callback is called when speech ends.
     func speak(_ text: String, viaVoiceOver: Bool = false, onFinished: (() -> Void)? = nil) {
-        stop()
+        stop(notifyFinished: false)
         self.onFinished = onFinished
 
         if viaVoiceOver && isVoiceOverRunning() {
@@ -52,7 +53,7 @@ class AccessibilitySpeaker: NSObject, NSSpeechSynthesizerDelegate {
     /// are spoken sequentially. Call `endStreaming` when all chunks have been enqueued.
     /// For VoiceOver, chunks are accumulated and spoken as one utterance at `endStreaming`.
     func beginStreaming(viaVoiceOver: Bool = false, onFinished: (() -> Void)? = nil) {
-        stop()
+        stop(notifyFinished: false)
         self.onFinished = onFinished
         isStreamingMode = true
         isStreamingDone = false
@@ -73,7 +74,7 @@ class AccessibilitySpeaker: NSObject, NSSpeechSynthesizerDelegate {
 
         speechQueue.append(text)
 
-        if !isUsingVoiceOver && !synthesizer.isSpeaking {
+        if !isUsingVoiceOver && !isSynthesizerChunkActive {
             speakNextChunk()
         }
     }
@@ -92,21 +93,28 @@ class AccessibilitySpeaker: NSObject, NSSpeechSynthesizerDelegate {
             } else {
                 completeStreaming()
             }
-        } else if !synthesizer.isSpeaking && speechQueue.isEmpty {
+        } else if !isSynthesizerChunkActive && speechQueue.isEmpty {
             completeStreaming()
         }
     }
 
     /// Stop any ongoing speech immediately.
     func stop() {
+        stop(notifyFinished: true)
+    }
+
+    private func stop(notifyFinished: Bool) {
         if synthesizer.isSpeaking {
             synthesizer.stopSpeaking()
         }
         speechQueue.removeAll()
         isStreamingMode = false
         isStreamingDone = false
+        isSynthesizerChunkActive = false
         isSpeaking = false
-        onFinished?()
+        if notifyFinished {
+            onFinished?()
+        }
         onFinished = nil
     }
 
@@ -114,6 +122,7 @@ class AccessibilitySpeaker: NSObject, NSSpeechSynthesizerDelegate {
 
     private func completeStreaming() {
         isStreamingMode = false
+        isSynthesizerChunkActive = false
         isSpeaking = false
         onFinished?()
         onFinished = nil
@@ -128,7 +137,11 @@ class AccessibilitySpeaker: NSObject, NSSpeechSynthesizerDelegate {
         }
 
         let chunk = speechQueue.removeFirst()
-        synthesizer.startSpeaking(chunk)
+        isSynthesizerChunkActive = true
+        if !synthesizer.startSpeaking(chunk) {
+            isSynthesizerChunkActive = false
+            speakNextChunk()
+        }
     }
 
     // MARK: - VoiceOver
@@ -190,6 +203,7 @@ class AccessibilitySpeaker: NSObject, NSSpeechSynthesizerDelegate {
     nonisolated func speechSynthesizer(_ sender: NSSpeechSynthesizer, didFinishSpeaking finishedSpeaking: Bool) {
         Task { @MainActor in
             if self.isStreamingMode {
+                self.isSynthesizerChunkActive = false
                 self.speakNextChunk()
             } else {
                 self.isSpeaking = false

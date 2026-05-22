@@ -4,6 +4,7 @@ struct SettingsView: View {
     static let defaultSystemPrompt = "Du är en professionell syntolk. Beskriv bilden kort och objektivt för en person med synnedsättning. Svara direkt på svenska."
     static let defaultDefaultQuestion = "Utför din uppgift enligt din systemroll"
     static let defaultContinuousModePrompt = "Du är en professionell syntolk i kontinuerligt läge. Beskriv kort vad som händer just nu i bilden. Fokusera på förändringar och rörelser. Svara direkt på svenska, max 2-3 meningar."
+    @AppStorage("openAIBaseURL") private var openAIBaseURL = OpenAICompatibleClient.defaultBaseURLString
     @AppStorage("selectedModel") private var selectedModel = "ministral-3:latest"
     @AppStorage("systemPrompt") private var systemPrompt = SettingsView.defaultSystemPrompt
     @AppStorage("defaultQuestion") private var defaultQuestion =
@@ -22,7 +23,6 @@ struct SettingsView: View {
     @State private var isLoadingModels = false
     @State private var modelLoadError: String?
 
-    private let ollamaClient = OllamaClient()
     private let voices: [(id: String, label: String)] = {
         NSSpeechSynthesizer.availableVoices.map { voice in
             let attrs = NSSpeechSynthesizer.attributes(forVoice: voice)
@@ -34,7 +34,20 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            // --- Modellval ---
+            // --- AI-endpoint och modellval ---
+            Section("AI-server") {
+                TextField("Bas-URL", text: $openAIBaseURL)
+                    .textFieldStyle(.roundedBorder)
+                Text("Ange bas-URL för en OpenAI-kompatibel server, till exempel http://127.0.0.1:11434/v1 eller http://192.168.1.20:1234/v1.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                Button("Hämta modeller") {
+                    Task { await loadModels() }
+                }
+                .disabled(isLoadingModels)
+            }
+
             Section("Modell") {
                 if isLoadingModels {
                     ProgressView("Hämtar modeller...")
@@ -47,6 +60,8 @@ struct SettingsView: View {
                             Task { await loadModels() }
                         }
                     }
+                    TextField("Modellnamn", text: $selectedModel)
+                } else if availableModels.isEmpty {
                     TextField("Modellnamn", text: $selectedModel)
                 } else {
                     Picker("Aktiv modell", selection: $selectedModel) {
@@ -182,13 +197,22 @@ struct SettingsView: View {
         .task {
             await loadModels()
         }
+        .onChange(of: openAIBaseURL) {
+            availableModels = []
+            modelLoadError = nil
+        }
     }
 
     private func loadModels() async {
         isLoadingModels = true
         modelLoadError = nil
         do {
-            let models = try await ollamaClient.availableModels()
+            guard let baseURL = URL(string: openAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+                throw OpenAICompatibleError.invalidBaseURL(openAIBaseURL)
+            }
+
+            let client = OpenAICompatibleClient(baseURL: baseURL)
+            let models = try await client.availableModels()
             availableModels = models
             if !models.contains(selectedModel) && !models.isEmpty {
                 availableModels.insert(selectedModel, at: 0)
