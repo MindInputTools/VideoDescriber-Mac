@@ -875,6 +875,7 @@ class MainViewModel: ObservableObject {
 
         client.baseURL = baseURL
         client.model = selectedModel
+        client.apiKey = APIKeyStore.loadAPIKey()
     }
 
     /// Bygger fullständig prompt från systemprompt + valfri standardfråga.

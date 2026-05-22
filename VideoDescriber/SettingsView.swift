@@ -22,6 +22,8 @@ struct SettingsView: View {
     @State private var availableModels: [String] = []
     @State private var isLoadingModels = false
     @State private var modelLoadError: String?
+    @State private var openAIAPIKey = ""
+    @State private var apiKeySaveError: String?
 
     private let voices: [(id: String, label: String)] = {
         NSSpeechSynthesizer.availableVoices.map { voice in
@@ -41,6 +43,18 @@ struct SettingsView: View {
                 Text("Ange bas-URL för en OpenAI-kompatibel server, till exempel http://127.0.0.1:11434/v1 eller http://192.168.1.20:1234/v1.")
                     .font(.caption)
                     .foregroundColor(.secondary)
+
+                SecureField("API-nyckel (valfritt)", text: $openAIAPIKey)
+                    .textFieldStyle(.roundedBorder)
+                Text("Sparas i nyckelringen och skickas som Bearer-token när fältet inte är tomt.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                if let apiKeySaveError {
+                    Text("Kunde inte spara API-nyckel: \(apiKeySaveError)")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
 
                 Button("Hämta modeller") {
                     Task { await loadModels() }
@@ -195,11 +209,24 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 480, height: 600)
         .task {
+            openAIAPIKey = APIKeyStore.loadAPIKey()
             await loadModels()
         }
         .onChange(of: openAIBaseURL) {
             availableModels = []
             modelLoadError = nil
+        }
+        .onChange(of: openAIAPIKey) {
+            saveAPIKey()
+        }
+    }
+
+    private func saveAPIKey() {
+        do {
+            try APIKeyStore.saveAPIKey(openAIAPIKey)
+            apiKeySaveError = nil
+        } catch {
+            apiKeySaveError = error.localizedDescription
         }
     }
 
@@ -212,6 +239,7 @@ struct SettingsView: View {
             }
 
             let client = OpenAICompatibleClient(baseURL: baseURL)
+            client.apiKey = openAIAPIKey
             let models = try await client.availableModels()
             availableModels = models
             if !models.contains(selectedModel) && !models.isEmpty {

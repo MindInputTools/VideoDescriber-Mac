@@ -9,6 +9,7 @@ class OpenAICompatibleClient {
 
     var baseURL: URL
     var model: String = "ministral-3:latest"
+    var apiKey: String?
 
     /// Rolling conversation history. Kept compact — only the last
     /// `maxHistoryPairs` user/assistant exchanges are retained.
@@ -39,6 +40,7 @@ class OpenAICompatibleClient {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        applyAuthorization(to: &request)
         request.httpBody = try JSONEncoder().encode(body)
         request.timeoutInterval = 120
 
@@ -58,6 +60,7 @@ class OpenAICompatibleClient {
     func availableModels() async throws -> [String] {
         let endpoint = endpointURL(path: "models")
         var request = URLRequest(url: endpoint)
+        applyAuthorization(to: &request)
         request.timeoutInterval = 30
 
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -81,6 +84,7 @@ class OpenAICompatibleClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        applyAuthorization(to: &request)
         request.httpBody = try JSONEncoder().encode(body)
         request.timeoutInterval = 120
 
@@ -140,6 +144,15 @@ class OpenAICompatibleClient {
 
     private func endpointURL(path: String) -> URL {
         baseURL.appendingPathComponent(path)
+    }
+
+    private func applyAuthorization(to request: inout URLRequest) {
+        guard let apiKey = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !apiKey.isEmpty else {
+            return
+        }
+
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
     }
 
     private func chatMessages(imageBase64: String, prompt: String, system: String) -> [OpenAIChatMessage] {
