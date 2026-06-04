@@ -4,8 +4,10 @@ struct SettingsView: View {
     static let defaultSystemPrompt = "Du är en professionell syntolk. Beskriv bilden kort och objektivt för en person med synnedsättning. Svara direkt på svenska."
     static let defaultDefaultQuestion = "Utför din uppgift enligt din systemroll"
     static let defaultContinuousModePrompt = "Du är en professionell syntolk i kontinuerligt läge. Beskriv kort vad som händer just nu i bilden. Fokusera på förändringar och rörelser. Svara direkt på svenska, max 2-3 meningar."
+    @AppStorage("aiBackend") private var aiBackendRaw = AIBackend.openAICompatible.rawValue
     @AppStorage("openAIBaseURL") private var openAIBaseURL = OpenAICompatibleClient.defaultBaseURLString
     @AppStorage("selectedModel") private var selectedModel = "ministral-3:latest"
+    @AppStorage("selectedMLXModel") private var selectedMLXModelRaw = MLXModel.gemma4E4B.rawValue
     @AppStorage("systemPrompt") private var systemPrompt = SettingsView.defaultSystemPrompt
     @AppStorage("defaultQuestion") private var defaultQuestion =
     SettingsView.defaultDefaultQuestion
@@ -24,6 +26,17 @@ struct SettingsView: View {
     @State private var modelLoadError: String?
     @State private var openAIAPIKey = ""
     @State private var apiKeySaveError: String?
+    @State private var mlxStatus = "MLX-modell inte laddad"
+    @State private var isLoadingMLXModel = false
+    @State private var mlxDownloadProgress: Double = 0
+
+    private var aiBackend: AIBackend {
+        AIBackend(rawValue: aiBackendRaw) ?? .openAICompatible
+    }
+
+    private var selectedMLXModel: MLXModel {
+        MLXModel(rawValue: selectedMLXModelRaw) ?? .gemma4E4B
+    }
 
     private let voices: [(id: String, label: String)] = {
         NSSpeechSynthesizer.availableVoices.map { voice in
@@ -36,52 +49,103 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            // --- AI-endpoint och modellval ---
-            Section("AI-server") {
-                TextField("Bas-URL", text: $openAIBaseURL)
-                    .textFieldStyle(.roundedBorder)
-                Text("Ange bas-URL för en OpenAI-kompatibel server, till exempel http://127.0.0.1:11434/v1 eller http://192.168.1.20:1234/v1.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
-                SecureField("API-nyckel (valfritt)", text: $openAIAPIKey)
-                    .textFieldStyle(.roundedBorder)
-                Text("Sparas i nyckelringen och skickas som Bearer-token när fältet inte är tomt.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-
-                if let apiKeySaveError {
-                    Text("Kunde inte spara API-nyckel: \(apiKeySaveError)")
-                        .font(.caption)
-                        .foregroundColor(.red)
+            Section("AI-backend") {
+                Picker("Aktiv backend", selection: $aiBackendRaw) {
+                    ForEach(AIBackend.allCases) { backend in
+                        Text(backend.displayName).tag(backend.rawValue)
+                    }
                 }
-
-                Button("Hämta modeller") {
-                    Task { await loadModels() }
-                }
-                .disabled(isLoadingModels)
+                .pickerStyle(.radioGroup)
             }
 
-            Section("Modell") {
-                if isLoadingModels {
-                    ProgressView("Hämtar modeller...")
-                } else if let error = modelLoadError {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Kunde inte hämta modeller: \(error)")
-                            .foregroundColor(.red)
+            // --- AI-endpoint och modellval ---
+            if aiBackend == .openAICompatible {
+                Section("AI-server") {
+                    TextField("Bas-URL", text: $openAIBaseURL)
+                        .textFieldStyle(.roundedBorder)
+                    Text("Ange bas-URL för en OpenAI-kompatibel server, till exempel http://127.0.0.1:11434/v1 eller http://192.168.1.20:1234/v1.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    SecureField("API-nyckel (valfritt)", text: $openAIAPIKey)
+                        .textFieldStyle(.roundedBorder)
+                    Text("Sparas i nyckelringen och skickas som Bearer-token när fältet inte är tomt.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    if let apiKeySaveError {
+                        Text("Kunde inte spara API-nyckel: \(apiKeySaveError)")
                             .font(.caption)
-                        Button("Försök igen") {
-                            Task { await loadModels() }
+                            .foregroundColor(.red)
+                    }
+
+                    Button("Hämta modeller") {
+                        Task { await loadModels() }
+                    }
+                    .disabled(isLoadingModels)
+                }
+
+                Section("Modell") {
+                    if isLoadingModels {
+                        ProgressView("Hämtar modeller...")
+                    } else if let error = modelLoadError {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Kunde inte hämta modeller: \(error)")
+                                .foregroundColor(.red)
+                                .font(.caption)
+                            Button("Försök igen") {
+                                Task { await loadModels() }
+                            }
+                        }
+                        TextField("Modellnamn", text: $selectedModel)
+                    } else if availableModels.isEmpty {
+                        TextField("Modellnamn", text: $selectedModel)
+                    } else {
+                        Picker("Aktiv modell", selection: $selectedModel) {
+                            ForEach(availableModels, id: \.self) { model in
+                                Text(model).tag(model)
+                            }
                         }
                     }
-                    TextField("Modellnamn", text: $selectedModel)
-                } else if availableModels.isEmpty {
-                    TextField("Modellnamn", text: $selectedModel)
-                } else {
-                    Picker("Aktiv modell", selection: $selectedModel) {
-                        ForEach(availableModels, id: \.self) { model in
-                            Text(model).tag(model)
+                }
+            } else {
+                Section("MLX-modell") {
+                    Picker("Aktiv modell", selection: $selectedMLXModelRaw) {
+                        ForEach(MLXModel.allCases) { model in
+                            Text(model.displayName).tag(model.rawValue)
                         }
+                    }
+
+                    Text(selectedMLXModel.shortDescription)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Text(selectedMLXModel.mlxModelId)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .textSelection(.enabled)
+
+                    if isLoadingMLXModel {
+                        ProgressView(value: mlxDownloadProgress)
+                        Text(mlxStatus)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text(mlxStatus)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    HStack {
+                        Button("Ladda modell") {
+                            Task { await loadMLXModel() }
+                        }
+                        .disabled(isLoadingMLXModel)
+
+                        Button("Lossa modell") {
+                            Task { await unloadMLXModel() }
+                        }
+                        .disabled(isLoadingMLXModel)
                     }
                 }
             }
@@ -210,7 +274,9 @@ struct SettingsView: View {
         .frame(width: 480, height: 600)
         .task {
             openAIAPIKey = APIKeyStore.loadAPIKey()
-            await loadModels()
+            if aiBackend == .openAICompatible {
+                await loadModels()
+            }
         }
         .onChange(of: openAIBaseURL) {
             availableModels = []
@@ -250,5 +316,51 @@ struct SettingsView: View {
             availableModels = [selectedModel]
         }
         isLoadingModels = false
+    }
+
+    private func loadMLXModel() async {
+        isLoadingMLXModel = true
+        mlxDownloadProgress = 0
+        mlxStatus = "Laddar \(selectedMLXModel.displayName)..."
+
+        let progressTask = Task {
+            while !Task.isCancelled {
+                let state = await MLXEngine.shared.state
+                await MainActor.run {
+                    switch state {
+                    case .downloading(let progress):
+                        mlxDownloadProgress = progress
+                        mlxStatus = "Hämtar modell... \(Int(progress * 100))%"
+                    case .loading:
+                        mlxStatus = "Läser in modell..."
+                    case .ready:
+                        mlxStatus = "MLX-modell laddad"
+                    case .generating:
+                        mlxStatus = "MLX genererar..."
+                    case .error(let message):
+                        mlxStatus = "MLX-fel: \(message)"
+                    case .idle:
+                        break
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 300_000_000)
+            }
+        }
+
+        do {
+            try await MLXEngine.shared.loadModel(selectedMLXModel)
+            mlxStatus = "MLX-modell laddad: \(selectedMLXModel.displayName)"
+        } catch {
+            mlxStatus = "MLX-fel: \(error.localizedDescription)"
+        }
+
+        progressTask.cancel()
+        isLoadingMLXModel = false
+    }
+
+    private func unloadMLXModel() async {
+        await MLXEngine.shared.unloadModel()
+        mlxDownloadProgress = 0
+        mlxStatus = "MLX-modell inte laddad"
     }
 }

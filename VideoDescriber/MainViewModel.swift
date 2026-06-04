@@ -31,10 +31,15 @@ class MainViewModel: ObservableObject {
     @Published var sessionPrompt: String?
     @Published var hasSessionPrompt: Bool = false
     @Published var lastCapturedImageBase64: String?
+    @Published var mlxModelStateMessage: String = "MLX-modell inte laddad"
+    @Published var mlxDownloadProgress: Double = 0
+    @Published var isLoadingMLXModel: Bool = false
 
     // MARK: - Inställningar (UserDefaults)
+    @AppStorage("aiBackend") private var aiBackendRaw = AIBackend.openAICompatible.rawValue
     @AppStorage("openAIBaseURL") private var openAIBaseURL = OpenAICompatibleClient.defaultBaseURLString
     @AppStorage("selectedModel") private var selectedModel = "ministral-3:latest"
+    @AppStorage("selectedMLXModel") private var selectedMLXModelRaw = MLXModel.gemma4E4B.rawValue
     @AppStorage("systemPrompt") private var systemPrompt = SettingsView.defaultSystemPrompt
     @AppStorage("defaultQuestion") private var defaultQuestion =
     SettingsView.defaultDefaultQuestion
@@ -51,6 +56,7 @@ class MainViewModel: ObservableObject {
     private let smartBorderDetector = SmartBorderDetector()
     private let motionDetector = VideoMotionDetector()
     private var aiClient = OpenAICompatibleClient()
+    private let mlxEngine = MLXEngine.shared
 
     private var activeDetector: VideoAreaDetecting {
         let method = VideoDetectionMethod(rawValue: detectionMethodRaw) ?? .smartBorder
@@ -80,6 +86,15 @@ class MainViewModel: ObservableObject {
     private var previousApp: NSRunningApplication?
     /// Separate AI client for "question on image" so it doesn't pollute the main conversation context.
     private var questionAIClient = OpenAICompatibleClient()
+    private var lastCapturedImage: CGImage?
+
+    private var aiBackend: AIBackend {
+        AIBackend(rawValue: aiBackendRaw) ?? .openAICompatible
+    }
+
+    private var selectedMLXModel: MLXModel {
+        MLXModel(rawValue: selectedMLXModelRaw) ?? .gemma4E4B
+    }
 
     // MARK: - Window Picking
     func pickWindow() async {
@@ -281,53 +296,14 @@ class MainViewModel: ObservableObject {
 
         // Store last image for "question on image" feature
         lastCapturedImageBase64 = base64
+        lastCapturedImage = cropped
 
-        // Send to the OpenAI-compatible endpoint with streaming speech
-        do {
-            try configureClient(aiClient)
-            if !useConversationContext {
-                aiClient.resetConversation()
-            }
-
-            let speaker = AccessibilitySpeaker.shared
-            speaker.beginStreaming(viaVoiceOver: willUseVoiceOver) { [weak self] in
-                self?.isSpeaking = false
-                if self?.videoPausedByUs == true {
-                    self?.sendMediaPlayPause()
-                    self?.videoPausedByUs = false
-                }
-            }
-            isSpeaking = true
-
-            let chunker = SentenceChunker()
-
-            let response = try await aiClient.describeStreaming(
-                imageBase64: base64,
-                prompt: sessionPrompt ?? defaultQuestion,
-                system: systemPrompt
-            ) { [weak self] token in
-                self?.aiResponse += token
-                for sentence in chunker.addToken(token) {
-                    speaker.enqueueSpeechChunk(sentence)
-                }
-            }
-
-            if let remaining = chunker.flush() {
-                speaker.enqueueSpeechChunk(remaining)
-            }
-            speaker.endStreaming()
-
-            aiResponse = response
-            hasConversationContext = aiClient.hasConversationContext
-            statusMessage = "Beskrivning klar."
-            statusColor = .green
-
-        } catch {
-            statusMessage = "AI-fel: \(error.localizedDescription)"
-            statusColor = .red
-            AccessibilitySpeaker.shared.stop()
-            if videoPausedByUs { sendMediaPlayPause(); videoPausedByUs = false }
-        }
+        await describeImage(
+            cropped,
+            imageBase64: base64,
+            prompt: sessionPrompt ?? defaultQuestion,
+            useVoiceOverForSpeech: willUseVoiceOver
+        )
 
         isDescribing = false
     }
@@ -389,58 +365,15 @@ class MainViewModel: ObservableObject {
 
         // Store last image for "question on image" feature
         lastCapturedImageBase64 = base64
+        lastCapturedImage = cropped
 
-        do {
-            try configureClient(aiClient)
-            if !useConversationContext {
-                aiClient.resetConversation()
-            }
-
-            let speaker = AccessibilitySpeaker.shared
-            let chunker = SentenceChunker()
-            aiResponse = ""
-            isSpeaking = true
-
-            let speechFinished = AsyncStream<Void> { continuation in
-                var didFinish = false
-                speaker.beginStreaming(viaVoiceOver: willUseVoiceOver) { [weak self] in
-                    self?.isSpeaking = false
-                    guard !didFinish else { return }
-                    didFinish = true
-                    continuation.yield(())
-                    continuation.finish()
-                }
-            }
-
-            let response = try await aiClient.describeStreaming(
-                imageBase64: base64,
-                prompt: sessionPrompt ?? continuousModePrompt,
-                system: systemPrompt
-            ) { [weak self] token in
-                self?.aiResponse += token
-                for sentence in chunker.addToken(token) {
-                    speaker.enqueueSpeechChunk(sentence)
-                }
-            }
-
-            if let remaining = chunker.flush() {
-                speaker.enqueueSpeechChunk(remaining)
-            }
-            speaker.endStreaming()
-
-            for await _ in speechFinished {
-                break
-            }
-
-            aiResponse = response
-            hasConversationContext = aiClient.hasConversationContext
-        } catch {
-            if !Task.isCancelled {
-                statusMessage = "AI-fel: \(error.localizedDescription)"
-                statusColor = .red
-            }
-            AccessibilitySpeaker.shared.stop()
-        }
+        await describeImage(
+            cropped,
+            imageBase64: base64,
+            prompt: sessionPrompt ?? continuousModePrompt,
+            useVoiceOverForSpeech: willUseVoiceOver,
+            waitForSpeech: true
+        )
 
         isDescribing = false
     }
@@ -479,6 +412,56 @@ class MainViewModel: ObservableObject {
     func resetConversationContext() {
         aiClient.resetConversation()
         hasConversationContext = false
+    }
+
+    func loadSelectedMLXModel() async {
+        isLoadingMLXModel = true
+        mlxDownloadProgress = 0
+        mlxModelStateMessage = "Laddar \(selectedMLXModel.displayName)..."
+
+        let progressTask = Task { [weak self] in
+            while !Task.isCancelled {
+                let state = await MLXEngine.shared.state
+                await MainActor.run {
+                    switch state {
+                    case .downloading(let progress):
+                        self?.mlxDownloadProgress = progress
+                        self?.mlxModelStateMessage = "Hämtar modell... \(Int(progress * 100))%"
+                    case .loading:
+                        self?.mlxModelStateMessage = "Läser in modell..."
+                    case .ready:
+                        self?.mlxModelStateMessage = "MLX-modell laddad"
+                    case .generating:
+                        self?.mlxModelStateMessage = "MLX genererar..."
+                    case .error(let message):
+                        self?.mlxModelStateMessage = "MLX-fel: \(message)"
+                    case .idle:
+                        break
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 300_000_000)
+            }
+        }
+
+        do {
+            try await mlxEngine.loadModel(selectedMLXModel)
+            mlxModelStateMessage = "MLX-modell laddad: \(selectedMLXModel.displayName)"
+            statusMessage = mlxModelStateMessage
+            statusColor = .green
+        } catch {
+            mlxModelStateMessage = "MLX-fel: \(error.localizedDescription)"
+            statusMessage = mlxModelStateMessage
+            statusColor = .red
+        }
+
+        progressTask.cancel()
+        isLoadingMLXModel = false
+    }
+
+    func unloadMLXModel() async {
+        await mlxEngine.unloadModel()
+        mlxDownloadProgress = 0
+        mlxModelStateMessage = "MLX-modell inte laddad"
     }
 
     // MARK: - Auto-Hotkey Flow (§ key, Shift-§ for custom prompt)
@@ -796,13 +779,18 @@ class MainViewModel: ObservableObject {
         questionAnswer = ""
 
         do {
-            try configureClient(questionAIClient)
-            questionAIClient.resetConversation()
-            let answer = try await questionAIClient.describe(
-                imageBase64: imageBase64,
-                prompt: question,
-                system: systemPrompt
-            )
+            let answer: String
+            if aiBackend == .mlxLocal, let lastCapturedImage {
+                answer = try await runMLXDescription(image: lastCapturedImage, prompt: question) { _ in }
+            } else {
+                try configureClient(questionAIClient)
+                questionAIClient.resetConversation()
+                answer = try await questionAIClient.describe(
+                    imageBase64: imageBase64,
+                    prompt: question,
+                    system: systemPrompt
+                )
+            }
             questionAnswer = answer
 
             if !showOnScreen {
@@ -866,6 +854,168 @@ class MainViewModel: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    private func describeImage(
+        _ image: CGImage,
+        imageBase64: String,
+        prompt: String,
+        useVoiceOverForSpeech: Bool,
+        waitForSpeech: Bool = false
+    ) async {
+        do {
+            if aiBackend == .openAICompatible {
+                try await describeImageWithOpenAI(
+                    imageBase64: imageBase64,
+                    prompt: prompt,
+                    useVoiceOverForSpeech: useVoiceOverForSpeech,
+                    waitForSpeech: waitForSpeech
+                )
+            } else {
+                try await describeImageWithMLX(
+                    image: image,
+                    prompt: prompt,
+                    useVoiceOverForSpeech: useVoiceOverForSpeech,
+                    waitForSpeech: waitForSpeech
+                )
+            }
+
+            statusMessage = "Beskrivning klar."
+            statusColor = .green
+        } catch {
+            statusMessage = "AI-fel: \(error.localizedDescription)"
+            statusColor = .red
+            AccessibilitySpeaker.shared.stop()
+            if videoPausedByUs { sendMediaPlayPause(); videoPausedByUs = false }
+        }
+    }
+
+    private func describeImageWithOpenAI(
+        imageBase64: String,
+        prompt: String,
+        useVoiceOverForSpeech: Bool,
+        waitForSpeech: Bool
+    ) async throws {
+        try configureClient(aiClient)
+        if !useConversationContext {
+            aiClient.resetConversation()
+        }
+
+        let speaker = AccessibilitySpeaker.shared
+        let chunker = SentenceChunker()
+        let speechFinished = makeSpeechFinishedStream(speaker: speaker, useVoiceOver: useVoiceOverForSpeech)
+        isSpeaking = true
+
+        let response = try await aiClient.describeStreaming(
+            imageBase64: imageBase64,
+            prompt: prompt,
+            system: systemPrompt
+        ) { [weak self] token in
+            self?.aiResponse += token
+            for sentence in chunker.addToken(token) {
+                speaker.enqueueSpeechChunk(sentence)
+            }
+        }
+
+        if let remaining = chunker.flush() {
+            speaker.enqueueSpeechChunk(remaining)
+        }
+        speaker.endStreaming()
+
+        if waitForSpeech {
+            for await _ in speechFinished { break }
+        }
+
+        aiResponse = response
+        hasConversationContext = aiClient.hasConversationContext
+    }
+
+    private func describeImageWithMLX(
+        image: CGImage,
+        prompt: String,
+        useVoiceOverForSpeech: Bool,
+        waitForSpeech: Bool
+    ) async throws {
+        if !(await mlxEngine.isReady) {
+            try await mlxEngine.loadModel(selectedMLXModel)
+        }
+
+        let speaker = AccessibilitySpeaker.shared
+        let chunker = SentenceChunker()
+        let speechFinished = makeSpeechFinishedStream(speaker: speaker, useVoiceOver: useVoiceOverForSpeech)
+        isSpeaking = true
+
+        let response = try await runMLXDescription(image: image, prompt: prompt) { [weak self] token in
+            self?.aiResponse += token
+            for sentence in chunker.addToken(token) {
+                speaker.enqueueSpeechChunk(sentence)
+            }
+        }
+
+        if let remaining = chunker.flush() {
+            speaker.enqueueSpeechChunk(remaining)
+        }
+        speaker.endStreaming()
+
+        if waitForSpeech {
+            for await _ in speechFinished { break }
+        }
+
+        aiResponse = response
+        hasConversationContext = false
+    }
+
+    private func runMLXDescription(
+        image: CGImage,
+        prompt: String,
+        onToken: @escaping (String) -> Void
+    ) async throws -> String {
+        if !(await mlxEngine.isReady) {
+            try await mlxEngine.loadModel(selectedMLXModel)
+        }
+
+        let (stream, continuation) = AsyncThrowingStream<String, any Error>.makeStream()
+        let inferenceTask = Task {
+            await mlxEngine.runAnalysis(
+                image: image,
+                systemMessage: systemPrompt,
+                userPrompt: prompt,
+                continuation: continuation
+            )
+        }
+
+        var response = ""
+        do {
+            for try await token in stream {
+                response += token
+                onToken(token)
+            }
+            await inferenceTask.value
+            return response
+        } catch {
+            await inferenceTask.value
+            throw error
+        }
+    }
+
+    private func makeSpeechFinishedStream(
+        speaker: AccessibilitySpeaker,
+        useVoiceOver: Bool
+    ) -> AsyncStream<Void> {
+        AsyncStream { continuation in
+            var didFinish = false
+            speaker.beginStreaming(viaVoiceOver: useVoiceOver) { [weak self] in
+                self?.isSpeaking = false
+                if self?.videoPausedByUs == true {
+                    self?.sendMediaPlayPause()
+                    self?.videoPausedByUs = false
+                }
+                guard !didFinish else { return }
+                didFinish = true
+                continuation.yield(())
+                continuation.finish()
+            }
+        }
+    }
 
     private func configureClient(_ client: OpenAICompatibleClient) throws {
         let trimmedBaseURL = openAIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1108,5 +1258,3 @@ extension String {
         return result
     }
 }
-
-
