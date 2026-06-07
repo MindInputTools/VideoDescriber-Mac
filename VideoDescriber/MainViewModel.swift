@@ -87,6 +87,7 @@ class MainViewModel: ObservableObject {
     /// Separate AI client for "question on image" so it doesn't pollute the main conversation context.
     private var questionAIClient = OpenAICompatibleClient()
     private var lastCapturedImage: CGImage?
+    private var mlxConversationHistory: [ConversationMessage] = []
 
     private var aiBackend: AIBackend {
         AIBackend(rawValue: aiBackendRaw) ?? .openAICompatible
@@ -411,6 +412,7 @@ class MainViewModel: ObservableObject {
     /// without any context from previous frames.
     func resetConversationContext() {
         aiClient.resetConversation()
+        mlxConversationHistory.removeAll()
         hasConversationContext = false
     }
 
@@ -781,7 +783,11 @@ class MainViewModel: ObservableObject {
         do {
             let answer: String
             if aiBackend == .mlxLocal, let lastCapturedImage {
-                answer = try await runMLXDescription(image: lastCapturedImage, prompt: question) { _ in }
+                answer = try await runMLXDescription(
+                    image: lastCapturedImage,
+                    prompt: question,
+                    conversationHistory: []
+                ) { _ in }
             } else {
                 try configureClient(questionAIClient)
                 questionAIClient.resetConversation()
@@ -939,12 +945,20 @@ class MainViewModel: ObservableObject {
             try await mlxEngine.loadModel(selectedMLXModel)
         }
 
+        if !useConversationContext {
+            mlxConversationHistory.removeAll()
+        }
+
         let speaker = AccessibilitySpeaker.shared
         let chunker = SentenceChunker()
         let speechFinished = makeSpeechFinishedStream(speaker: speaker, useVoiceOver: useVoiceOverForSpeech)
         isSpeaking = true
 
-        let response = try await runMLXDescription(image: image, prompt: prompt) { [weak self] token in
+        let response = try await runMLXDescription(
+            image: image,
+            prompt: prompt,
+            conversationHistory: trimmedMLXConversationHistory()
+        ) { [weak self] token in
             self?.aiResponse += token
             for sentence in chunker.addToken(token) {
                 speaker.enqueueSpeechChunk(sentence)
@@ -960,13 +974,15 @@ class MainViewModel: ObservableObject {
             for await _ in speechFinished { break }
         }
 
+        storeMLXConversation(prompt: prompt, response: response)
         aiResponse = response
-        hasConversationContext = false
+        hasConversationContext = !mlxConversationHistory.isEmpty
     }
 
     private func runMLXDescription(
         image: CGImage,
         prompt: String,
+        conversationHistory: [ConversationMessage] = [],
         onToken: @escaping (String) -> Void
     ) async throws -> String {
         if !(await mlxEngine.isReady) {
@@ -979,6 +995,7 @@ class MainViewModel: ObservableObject {
                 image: image,
                 systemMessage: systemPrompt,
                 userPrompt: prompt,
+                conversationHistory: conversationHistory,
                 continuation: continuation
             )
         }
@@ -1026,6 +1043,27 @@ class MainViewModel: ObservableObject {
         client.baseURL = baseURL
         client.model = selectedModel
         client.apiKey = APIKeyStore.loadAPIKey()
+    }
+
+    private func storeMLXConversation(prompt: String, response: String) {
+        mlxConversationHistory.append(ConversationMessage(role: "user", content: prompt))
+        mlxConversationHistory.append(ConversationMessage(role: "assistant", content: response))
+        trimMLXConversationHistoryIfNeeded()
+    }
+
+    private func trimmedMLXConversationHistory() -> [ConversationMessage] {
+        let maxMessages = aiClient.maxHistoryPairs * 2
+        if mlxConversationHistory.count <= maxMessages {
+            return mlxConversationHistory
+        }
+        return Array(mlxConversationHistory.suffix(maxMessages))
+    }
+
+    private func trimMLXConversationHistoryIfNeeded() {
+        let maxMessages = aiClient.maxHistoryPairs * 2
+        if mlxConversationHistory.count > maxMessages {
+            mlxConversationHistory = Array(mlxConversationHistory.suffix(maxMessages))
+        }
     }
 
     /// Bygger fullständig prompt från systemprompt + valfri standardfråga.

@@ -79,6 +79,7 @@ actor MLXEngine {
         image: CGImage,
         systemMessage: String,
         userPrompt: String,
+        conversationHistory: [ConversationMessage] = [],
         continuation: AsyncThrowingStream<String, any Error>.Continuation
     ) async {
         Memory.clearCache()
@@ -94,10 +95,20 @@ actor MLXEngine {
             let lmInput: LMInput = try await {
                 let ciImage = CIImage(cgImage: image)
                 let input = UserInput(
-                    chat: [
-                        .system(systemMessage),
-                        .user(userPrompt, images: [.ciImage(ciImage)])
-                    ]
+                    chat: [.system(systemMessage)]
+                        + conversationHistory.compactMap { message in
+                            switch message.role {
+                            case "assistant":
+                                .assistant(message.content)
+                            case "system":
+                                .system(message.content)
+                            case "user":
+                                .user(message.content)
+                            default:
+                                nil
+                            }
+                        }
+                        + [.user(userPrompt, images: [.ciImage(ciImage)])]
                 )
                 return try await container.prepare(input: input)
             }()
